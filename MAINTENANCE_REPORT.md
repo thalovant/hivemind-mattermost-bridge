@@ -1,6 +1,14 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Adversarial review of main 2a45629c: seven findings fixed on fix/review-2026-11-03.
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: CodeRabbit on PR #2: Retry-After HTTP date parsed; QUICK_FACTS retry count corrected.
 
 # Maintenance report: hivemind-mattermost-bridge
+
+
+## 2026-11-03: CodeRabbit on pull request #2
+
+- **Retry-After as an HTTP date** (thread `PRRT_kwDOVg5F3s6y_TFL`): `retry_after` (`mattermost_bridge/mattermost.py`) read only numbers, so a 429 that named its retry time as a date waited the 1 s default and could spend all three tries before that time. It now counts until a future date; a past, current or unreadable value falls through to `X-Ratelimit-Reset`, then to `DEFAULT_RETRY_AFTER`; `_post` still caps the wait at `RATE_LIMIT_MAX_WAIT`. Tests: `tests/test_replies.py::test_a_retry_after_http_date_alone_counts_until_that_time` (6 cases, date only), `::test_a_past_date_falls_back_to_the_reset_header`.
+- **QUICK_FACTS retry count** (thread `PRRT_kwDOVg5F3s6y_TFP`): "tried up to 3 times (retried at most twice)", as `docs/configuration.md` already said.
+- **Verification:** the 7 new tests fail against the previous `mattermost.py`; `python -m pytest tests -q` (ovos-config's file watcher off, no inotify watches left on this host): 175 passed; `ruff check --isolated --select F,E9 .` clean.
+- **Transparency report:** AI model Claude Opus 5.5 (`claude-opus-5-5`) in Claude Code; applied both automated review comments with tests; no human review yet.
 
 ## 2026-11-03: adversarial review of `main` (`2a45629c`)
 

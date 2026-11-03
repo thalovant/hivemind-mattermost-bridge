@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Review fixes: reply defusing, reply allow-list, paced sender with 429 retry, long replies split, redirect and cleartext checks.
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: CodeRabbit on PR #2: Retry-After as an HTTP date.
 
 # Configuration reference
 
@@ -109,7 +109,7 @@ logged.
 | Websocket never confirmed with `hello` (30 s) | the token is checked with `GET /users/me`, then reconnected |
 | HTTP 401 on any call | `TokenRejected`: the bridge stops, `token_rejected` goes to `/dev/termination-log`, exit status 78 |
 | Token revoked while connected | the server keeps the websocket open and stops sending events on it; `GET /users/me` every 60 s (`TOKEN_CHECK_INTERVAL`) finds the 401, as above |
-| A reply is rate limited (HTTP 429) | retried after `Retry-After` / `X-Ratelimit-Reset` (at most `RATE_LIMIT_MAX_WAIT`, 30 s), `RATE_LIMIT_ATTEMPTS` (3) tries, then dropped and logged |
+| A reply is rate limited (HTTP 429) | retried after `Retry-After` (seconds, or an HTTP date: the time until it) / `X-Ratelimit-Reset` (at most `RATE_LIMIT_MAX_WAIT`, 30 s), `RATE_LIMIT_ATTEMPTS` (3) tries, then dropped and logged |
 | A reply fails otherwise (HTTP 4xx/5xx, network) | logged with the channel id and status, dropped |
 | Websocket handshake redirected to another host | the token is not sent; logged, reconnected with backoff; `/readyz` 503 |
 | Hub refuses the credentials or never completes the handshake | `start()` raises after the bounded retries; exit status 1 |

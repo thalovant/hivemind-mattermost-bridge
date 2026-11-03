@@ -105,6 +105,30 @@ def test_the_wait_a_429_asks_for(headers, seconds):
     assert retry_after(headers) == seconds
 
 
+NOW = __import__("datetime").datetime(2026, 11, 3, 12, 0, 0, tzinfo=__import__("datetime").timezone.utc)
+
+
+@pytest.mark.parametrize("header, seconds", [
+    ("Tue, 03 Nov 2026 12:00:12 GMT", 12.0),   # a future date: until then
+    ("Tue, 03 Nov 2026 13:00:00 GMT", 3600.0), # long; the caller caps it
+    ("Tue, 03 Nov 2026 11:59:00 GMT", 1.0),    # already past: the default
+    ("Tue, 03 Nov 2026 12:00:00 GMT", 1.0),    # now: the default
+    ("not a date", 1.0),
+    ("", 1.0),
+])
+def test_a_retry_after_http_date_alone_counts_until_that_time(header, seconds):
+    from mattermost_bridge.mattermost import retry_after
+
+    assert retry_after({"Retry-After": header}, now=NOW) == seconds
+
+
+def test_a_past_date_falls_back_to_the_reset_header():
+    from mattermost_bridge.mattermost import retry_after
+
+    headers = {"Retry-After": "Tue, 03 Nov 2026 11:00:00 GMT", "X-Ratelimit-Reset": "4"}
+    assert retry_after(headers, now=NOW) == 4.0
+
+
 def test_a_long_rate_limit_wait_is_capped(fast, monkeypatch):
     import mattermost_bridge
     from mattermost_bridge.mattermost import RateLimited

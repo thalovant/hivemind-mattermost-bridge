@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Review fixes: test count, reply sender and reply safety facts.
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: CodeRabbit on PR #2: the 429 retry count (3 tries, at most 2 retries) and Retry-After as an HTTP date.
 
 # Quick facts: hivemind-mattermost-bridge
 
@@ -18,7 +18,7 @@ Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Review fixes: test count, repl
 | Default branch | `main` (upstream: `JarbasHiveMind/HiveMind_mattermost_bridge`, branch `dev`) |
 | CI | `.github/workflows/ci.yml`: tests on Python 3.12 and 3.14, ruff `F,E9`, image smoke test, real-server integration, publish on `main` |
 | Tests | `tests/`: 168 tests including 2 e2e with a real hub (`python -m pytest tests -q`); `tests/integration/run.sh`: 21 checks against a real Mattermost server |
-| Replies | queued by `handle_speak`, posted by the `mattermost-replies` thread 0.2 s apart (`REPLY_INTERVAL`), at most 100 waiting (`REPLY_QUEUE_SIZE`); 429 retried 3 times (`RATE_LIMIT_ATTEMPTS`); split above 16383 characters (`MAX_POST_LENGTH`), at most 4 posts (`MAX_REPLY_POSTS`) |
+| Replies | queued by `handle_speak`, posted by the `mattermost-replies` thread 0.2 s apart (`REPLY_INTERVAL`), at most 100 waiting (`REPLY_QUEUE_SIZE`); 429: tried up to 3 times (retried at most twice; `RATE_LIMIT_ATTEMPTS`), each wait from `Retry-After` (seconds or an HTTP date) capped at 30 s (`RATE_LIMIT_MAX_WAIT`); split above 16383 characters (`MAX_POST_LENGTH`), at most 4 posts (`MAX_REPLY_POSTS`) |
 | Reply safety | `defuse_reply`: mentions in the hub's text broken (no `@channel`/`@all`/`@here`/user pings), Markdown images escaped; replies only to channels `may_answer` allows |
 | Token check | `GET /api/v4/users/me` every 60 s (`TOKEN_CHECK_INTERVAL`): a revoked token does not close the websocket |
 | HiveMind message types | sends `recognizer_loop:utterance`; handles `speak`, `hive.complete_intent_failure` |

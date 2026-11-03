@@ -22,6 +22,8 @@ import re
 import ssl
 import threading
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote, urlsplit, urlunsplit
 
@@ -76,14 +78,38 @@ class RateLimited(MattermostError):
 DEFAULT_RETRY_AFTER = 1.0
 
 
-def retry_after(headers: Any) -> float:
-    """Seconds a 429 asks to wait: ``Retry-After``, else ``X-Ratelimit-Reset`` (Mattermost sends both)."""
-    for name in ("Retry-After", "X-Ratelimit-Reset"):
+def _wait_seconds(value: Any, now: datetime) -> Optional[float]:
+    """One header as seconds to wait: a number, or a future HTTP date; None otherwise."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    try:
+        seconds = float(text)
+    except ValueError:
+        # Retry-After may be an HTTP date (RFC 9110): the time to retry at
         try:
-            seconds = float(headers.get(name))
-        except (TypeError, ValueError):  # absent, or an HTTP date
-            continue
-        if seconds >= 0:
+            when = parsedate_to_datetime(text)
+        except (TypeError, ValueError, IndexError, OverflowError):
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        seconds = (when - now).total_seconds()
+        return seconds if seconds > 0 else None  # a date already past says nothing
+    return seconds if seconds >= 0 else None
+
+
+def retry_after(headers: Any, now: Optional[datetime] = None) -> float:
+    """Seconds a 429 asks to wait: ``Retry-After``, else ``X-Ratelimit-Reset`` (Mattermost sends both).
+
+    Each may be a number of seconds; ``Retry-After`` may also be an HTTP date,
+    which counts until that time. A negative number, a date already past or
+    anything unreadable falls through to the next header, then to
+    ``DEFAULT_RETRY_AFTER``. The caller caps the wait (``RATE_LIMIT_MAX_WAIT``).
+    """
+    now = now or datetime.now(timezone.utc)
+    for name in ("Retry-After", "X-Ratelimit-Reset"):
+        seconds = _wait_seconds(headers.get(name), now)
+        if seconds is not None:
             return seconds
     return DEFAULT_RETRY_AFTER
 
