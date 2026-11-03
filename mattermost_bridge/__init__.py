@@ -55,7 +55,9 @@ from mattermost_bridge.mattermost import (
     DIRECT_CHANNEL_TYPES,
     MattermostAPI,
     Post,
+    USERNAME_PATTERN,
     TokenRejected,
+    defuse_reply,
     mention_pattern,
     parse_posted,
     websocket_host,
@@ -79,6 +81,9 @@ SESSION_SCOPES = ("person", "chat")
 #: of channels is set and accepts them otherwise; ``allow`` and ``deny`` say
 #: so whatever the allow-list.
 DM_POLICIES = ("auto", "allow", "deny")
+
+#: Mentions that notify everyone in a channel; never a person's username.
+CHANNEL_WIDE_MENTIONS = frozenset({"all", "channel", "here"})
 
 #: Seconds the server has to confirm the websocket login with its ``hello``.
 HELLO_TIMEOUT = 30
@@ -502,13 +507,9 @@ class HiveMindMattermostBridge:
         if not post.user_id or post.user_id == self.bot_id:
             return
 
-        if post.channel_type in DIRECT_CHANNEL_TYPES:
-            if self.dm_policy == "deny":
-                # Silently: answering every stranger's DM would let anyone
-                # make the bot post, and say that it exists.
-                LOG.debug("ignoring a direct message (dm policy: deny)")
-                return
-        elif self.allowed_channels is not None and post.channel_id not in self.allowed_channels:
+        if not self.may_answer(post.channel_id, post.channel_type):
+            # Silently: answering every stranger's DM would let anyone make
+            # the bot post, and say that it exists.
             LOG.debug(f"ignoring a post in non-allowed channel {post.channel_id}")
             return
 
@@ -521,6 +522,20 @@ class HiveMindMattermostBridge:
             return
 
         self.forward_to_hivemind(text, post)
+
+    def may_answer(self, channel_id: str, channel_type: Optional[str]) -> bool:
+        """Whether the bridge talks in ``channel_id`` at all, both ways.
+
+        A channel id in ``allowed_channels`` is answered whatever its type
+        (a listed group DM too). Any other direct or group-direct channel
+        follows ``dm_policy``; any other channel is answered only when no
+        list is set.
+        """
+        if self.allowed_channels is not None and channel_id in self.allowed_channels:
+            return True
+        if channel_type in DIRECT_CHANNEL_TYPES:
+            return self.dm_policy == "allow"
+        return self.allowed_channels is None
 
     async def addressed_text(self, post: Post) -> Optional[str]:
         """The text to forward, or ``None`` when the post is not for the bot.
@@ -613,7 +628,13 @@ class HiveMindMattermostBridge:
 
     def _reply(self, text: str, context: dict) -> None:
         channel_id = context.get("channel")
-        if not channel_id:
+        if not channel_id or not isinstance(channel_id, str):
+            return
+        if not self.may_answer(channel_id, context.get("channel_type")):
+            # The hub only echoes the context of what was forwarded, so this
+            # is a reply to a channel the bridge no longer serves (a reminder
+            # set before the list changed) or a context the hub made up.
+            LOG.warning(f"not replying in non-allowed channel {channel_id}")
             return
         user = context.get("user") if isinstance(context.get("user"), dict) else {}
         self.speak(text, channel_id,
@@ -625,12 +646,17 @@ class HiveMindMattermostBridge:
               username: Optional[str] = None, channel_type: Optional[str] = None) -> None:
         """Post ``text`` in ``channel_id``, in the thread ``root_id`` when given.
 
-        Outside a one-to-one direct message the reply starts with the
-        asker's ``@username``, so in a busy channel it is clear whom it
-        answers. Called from the HiveMind bus's own thread; the REST call is
-        blocking and thread safe.
+        The text is the hub's, so its mentions are broken and its images
+        escaped first (:func:`~mattermost_bridge.mattermost.defuse_reply`):
+        a reply never pings ``@channel``, ``@all``, ``@here``, a group or a
+        person. Outside a one-to-one direct message the reply then starts
+        with the asker's ``@username``, the one mention the bridge makes, so
+        in a busy channel it is clear whom it answers. Called from the
+        HiveMind bus's own thread; the REST call is blocking and thread safe.
         """
-        if username and channel_type != DIRECT:
+        text = defuse_reply(str(text))
+        if (username and channel_type != DIRECT and USERNAME_PATTERN.fullmatch(str(username))
+                and str(username).lower() not in CHANNEL_WIDE_MENTIONS):
             text = f"@{username} {text}"
         # The length, never the text: replies carry what people asked about,
         # and a debug log is kept, shipped and read far more widely than the chat.

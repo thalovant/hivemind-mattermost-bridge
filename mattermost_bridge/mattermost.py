@@ -142,6 +142,34 @@ def mention_pattern(username: str) -> "re.Pattern[str]":
                       re.IGNORECASE)
 
 
+#: An ``@`` that Mattermost's mention parser could read as the start of a
+#: mention (``@channel``, ``@all``, ``@here``, a user, a group): one not
+#: preceded by a letter or a digit (``me@example.com`` is an address, but
+#: ``x.@channel`` and ``_@all`` are mentions to the server) and followed by
+#: a character a name can hold.
+_MENTION_START = re.compile(rf"(?<![^\W_])@(?=[{_USERNAME_CHARS}])", re.IGNORECASE)
+#: U+2060 WORD JOINER: invisible, and neither a letter nor a digit, so the
+#: server's parser ends the word there and ``@\u2060channel`` pings no one.
+WORD_JOINER = "\u2060"
+
+
+def defuse_reply(text: str) -> str:
+    """The hub's reply made safe to post as the bot.
+
+    The reply is the hub's text, and the hub writes what it was asked to
+    (an assistant told to "say @channel ..." will): every mention in it is
+    broken with an invisible :data:`WORD_JOINER`, so the bot never notifies
+    a whole channel, a group or a person on someone else's behalf. Markdown
+    images (``![...](...)``) are escaped to plain text, because every
+    client that shows the post would fetch the image URL by itself, which
+    leaks who reads the channel and, from a hub that was talked into
+    putting the conversation in the URL, what was said. The rest of the
+    Markdown (lists, emphasis, code, links) is kept.
+    """
+    text = _MENTION_START.sub("@" + WORD_JOINER, text)
+    return text.replace("![", "!\\[")
+
+
 @dataclass(frozen=True)
 class Post:
     """The parts of a ``posted`` event the bridge reads."""
@@ -273,7 +301,8 @@ class MattermostAPI:
 
 __all__ = [
     "API_PATH", "DIRECT", "DIRECT_CHANNEL_TYPES", "GROUP_DIRECT", "ID_PATTERN",
-    "MattermostAPI", "MattermostError", "Post", "TokenRejected", "ca_bundle",
+    "MattermostAPI", "MattermostError", "Post", "TokenRejected", "WORD_JOINER",
+    "ca_bundle", "defuse_reply",
     "mention_pattern", "normalise_url", "parse_posted", "websocket_host",
     "websocket_url_for",
 ]
