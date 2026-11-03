@@ -15,6 +15,7 @@ Every call sends the token as ``Authorization: Bearer``; nothing here logs a
 token, a message or a reply. A 401 from the server raises
 :class:`TokenRejected`, the one failure no retry can fix.
 """
+import ipaddress
 import json
 import os
 import re
@@ -141,6 +142,23 @@ def normalise_url(url: str) -> str:
     if path.endswith(API_PATH):
         path = path[: -len(API_PATH)]
     return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+
+
+def is_cleartext(base_url: str) -> bool:
+    """Whether ``base_url`` sends the token and every message unencrypted to another machine.
+
+    ``http://`` to a loopback address (a local test server) is not.
+    """
+    parts = urlsplit(base_url)
+    if parts.scheme != "http":
+        return False
+    host = (parts.hostname or "").lower()
+    if host == "localhost" or host.endswith(".localhost"):
+        return False
+    try:
+        return not ipaddress.ip_address(host).is_loopback
+    except ValueError:  # a name, not an address
+        return True
 
 
 def websocket_url_for(base_url: str) -> str:
@@ -357,7 +375,8 @@ class MattermostAPI:
 __all__ = [
     "API_PATH", "DIRECT", "DIRECT_CHANNEL_TYPES", "GROUP_DIRECT", "ID_PATTERN",
     "MAX_POST_LENGTH", "MattermostAPI", "MattermostError", "Post", "RateLimited",
-    "TokenRejected", "WORD_JOINER", "ca_bundle", "defuse_reply", "retry_after",
+    "TokenRejected", "WORD_JOINER", "ca_bundle", "defuse_reply", "is_cleartext",
+    "retry_after",
     "split_post",
     "mention_pattern", "normalise_url", "parse_posted", "websocket_host",
     "websocket_url_for",

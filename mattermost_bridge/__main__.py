@@ -22,7 +22,7 @@ from typing import Mapping, Optional, Sequence
 from ovos_utils.log import LOG
 
 from mattermost_bridge import DM_POLICIES, SESSION_SCOPES, HiveMindMattermostBridge
-from mattermost_bridge.mattermost import ID_PATTERN, TokenRejected, normalise_url
+from mattermost_bridge.mattermost import ID_PATTERN, TokenRejected, is_cleartext, normalise_url
 
 #: option -> environment variable it falls back to.
 ENVIRONMENT = {
@@ -275,6 +275,9 @@ def stop_on_sigterm(signum: int, frame: object) -> None:
 def main(argv: Optional[Sequence[str]] = None) -> None:
     """Run the bridge with settings from flags, the environment and secret files."""
     options = resolve_options(argv)
+    if is_cleartext(options["url"]):
+        LOG.warning("MATTERMOST_URL starts with http://: the bot's token and every "
+                    "message travel unencrypted; use https://")
     signal.signal(signal.SIGTERM, stop_on_sigterm)
     LOG.info("bridge starting; press Ctrl-C to stop")
     try:

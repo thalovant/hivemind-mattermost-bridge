@@ -38,6 +38,7 @@ import contextlib
 import json
 import logging
 import queue
+import random
 import threading
 import time
 from collections import OrderedDict
@@ -127,6 +128,15 @@ REPLY_DRAIN_TIMEOUT = 5
 # logger of its own that never goes below warning, whatever the root level.
 _WEBSOCKET_LOG = logging.getLogger("mattermost_bridge.websocket")
 _WEBSOCKET_LOG.setLevel(logging.WARNING)
+
+
+def jittered(delay: float) -> float:
+    """``delay`` times a random factor between 0.5 and 1.5.
+
+    A server restart drops every bridge's websocket at once; without the
+    jitter they would all come back at the same instants, again and again.
+    """
+    return delay * random.uniform(0.5, 1.5)
 
 
 class HiveMindMattermostBridge:
@@ -384,9 +394,10 @@ class HiveMindMattermostBridge:
                 self._token_rejected.set()
                 raise
             except Exception as error:
+                wait = jittered(delay)
                 LOG.warning(f"cannot reach Mattermost ({type(error).__name__}); "
-                            f"retrying in {delay} s")
-                await self._sleep(delay)
+                            f"retrying in {wait:.1f} s")
+                await self._sleep(wait)
                 delay = min(delay * 2, RECONNECT_MAX_DELAY)
                 continue
             LOG.info(f"== logged in to Mattermost as @{self.bot_username}")
@@ -427,8 +438,9 @@ class HiveMindMattermostBridge:
                 delay = RECONNECT_MIN_DELAY
             else:
                 await self._check_token()
-            LOG.info(f"reconnecting to Mattermost in {delay} s")
-            await self._sleep(delay)
+            wait = jittered(delay)
+            LOG.info(f"reconnecting to Mattermost in {wait:.1f} s")
+            await self._sleep(wait)
             delay = min(delay * 2, RECONNECT_MAX_DELAY)
 
     async def _watch_token(self) -> None:

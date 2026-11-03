@@ -202,3 +202,17 @@ def test_a_websocket_redirected_to_another_host_never_gets_the_token(fake, run_b
         assert running.error is None
     finally:
         redirector.stop()
+
+
+def test_reconnect_waits_are_jittered_and_bounded(monkeypatch):
+    import mattermost_bridge
+
+    monkeypatch.setattr(mattermost_bridge.random, "uniform", lambda low, high: high)
+    assert mattermost_bridge.jittered(10) == 15
+    monkeypatch.setattr(mattermost_bridge.random, "uniform", lambda low, high: low)
+    assert mattermost_bridge.jittered(10) == 5
+    monkeypatch.undo()
+    waits = {round(mattermost_bridge.jittered(mattermost_bridge.RECONNECT_MAX_DELAY), 3)
+             for _ in range(50)}
+    assert len(waits) > 1
+    assert all(waits_ <= 1.5 * mattermost_bridge.RECONNECT_MAX_DELAY for waits_ in waits)
