@@ -160,7 +160,14 @@ class FakeMattermost:
             self._connections.discard(websocket)
 
     def push(self, event: dict) -> None:
-        """Send ``event`` to every logged-in websocket."""
+        """Send ``event`` to every logged-in websocket.
+
+        Like the real server, nothing is sent once the token is revoked; the
+        sockets stay open.
+        """
+        if not self.accept_token:
+            return
+
         async def send():
             for websocket in list(self._connections):
                 await websocket.send(json.dumps(event))

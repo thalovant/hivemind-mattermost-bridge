@@ -32,6 +32,7 @@ client's own thread and posts the reply with a blocking REST call, which
 :class:`~mattermost_bridge.mattermost.MattermostAPI` makes thread safe.
 """
 import asyncio
+import contextlib
 import json
 import logging
 import threading
@@ -85,6 +86,11 @@ RECONNECT_MIN_DELAY = 1
 RECONNECT_MAX_DELAY = 30
 #: How many thread roots the bridge remembers the author of.
 THREAD_ROOT_CACHE_SIZE = 1024
+#: Seconds between checks that the server still accepts the token. Revoking
+#: a token does not close the websocket: the server keeps it open and stops
+#: sending events on it, so without this the bridge would go deaf and stay
+#: "ready".
+TOKEN_CHECK_INTERVAL = 60
 
 # The websockets library logs every frame at debug level, the token's
 # authentication challenge and everyone's messages among them. Give it a
@@ -310,7 +316,13 @@ class HiveMindMattermostBridge:
             raise TokenRejected()
         try:
             if await self._log_in():
-                await self._listen_until_stopped()
+                watcher = asyncio.create_task(self._watch_token())
+                try:
+                    await self._listen_until_stopped()
+                finally:
+                    watcher.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await watcher
         finally:
             self._listening.clear()
             self._websocket = None
@@ -378,6 +390,26 @@ class HiveMindMattermostBridge:
             LOG.info(f"reconnecting to Mattermost in {delay} s")
             await self._sleep(delay)
             delay = min(delay * 2, RECONNECT_MAX_DELAY)
+
+    async def _watch_token(self) -> None:
+        """Every ``TOKEN_CHECK_INTERVAL`` seconds, ask the server whether the token still works.
+
+        A refused token stops the bridge (``TokenRejected`` from ``start()``);
+        an unreachable server is the websocket loop's business.
+        """
+        while not self._stopping():
+            await self._sleep(TOKEN_CHECK_INTERVAL)
+            if self._stopping():
+                return
+            try:
+                await asyncio.to_thread(self.api.me)
+            except TokenRejected:
+                LOG.error("Mattermost no longer accepts the bot's access token")
+                self._token_rejected.set()
+                self._request_stop()
+                return
+            except Exception:
+                pass
 
     async def _check_token(self) -> None:
         """After a websocket that never logged in: is it the token? Raises ``TokenRejected`` if so."""

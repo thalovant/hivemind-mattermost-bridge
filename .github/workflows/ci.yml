@@ -67,15 +67,15 @@ jobs:
           # The entrypoint is the bridge itself: --help answers and exits 0.
           # (Into a file: grep -q stops reading early, and under pipefail the
           # writer's broken pipe would fail the step.)
-          docker run --rm "$image" --help > help.txt
-          grep -q -- "--health-port" help.txt
+          docker run --rm "$image" --help > help.txt 2>&1 || { cat help.txt; exit 1; }
+          grep -q -- "--health-port" help.txt || { echo "no --health-port in --help:"; cat help.txt; exit 1; }
           uid="$(docker run --rm --entrypoint id "$image" -u)"
           test "$uid" = "10001" || { echo "the image runs as uid $uid, not 10001"; exit 1; }
           # With no token anywhere the bridge refuses to start, naming the variable.
           if docker run --rm --read-only -e MATTERMOST_URL=https://chat.example.com "$image" > out.txt 2>&1; then
-            echo "started without a token"; exit 1
+            echo "started without a token"; cat out.txt; exit 1
           fi
-          grep -q "MATTERMOST_TOKEN" out.txt
+          grep -q "MATTERMOST_TOKEN" out.txt || { echo "the refusal does not name MATTERMOST_TOKEN:"; cat out.txt; exit 1; }
       - name: The bridge starts on a read-only root, its identity where the platform mounts it
         run: |
           set -euo pipefail

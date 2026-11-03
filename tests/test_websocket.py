@@ -97,6 +97,28 @@ def test_a_token_revoked_while_running_stops_the_bridge(fake, run_bridge):
     assert not running.bridge.ready()
 
 
+def test_a_token_revoked_silently_is_found_by_the_periodic_check(fake, run_bridge, monkeypatch):
+    """What a real server does: the websocket stays open and simply goes quiet."""
+    import mattermost_bridge
+    from mattermost_bridge.mattermost import TokenRejected
+
+    monkeypatch.setattr(mattermost_bridge, "TOKEN_CHECK_INTERVAL", 0.2)
+    running = run_bridge()
+    fake.accept_token = False  # no drop: the socket stays up
+    running.thread.join(10)
+    assert isinstance(running.error, TokenRejected)
+    assert fake.auth_attempts == 1, "found by the check, not by a reconnect"
+
+
+def test_the_token_check_is_quiet_while_the_token_works(fake, run_bridge, monkeypatch):
+    import mattermost_bridge
+
+    monkeypatch.setattr(mattermost_bridge, "TOKEN_CHECK_INTERVAL", 0.05)
+    running = run_bridge()
+    assert wait_for(lambda: fake.calls.count("GET /api/v4/users/me") >= 4)
+    assert running.bridge.ready() and running.error is None
+
+
 def test_a_reply_refused_for_the_token_stops_the_bridge(fake, run_bridge):
     from mattermost_bridge.mattermost import TokenRejected
 
