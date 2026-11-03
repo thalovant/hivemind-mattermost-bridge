@@ -177,3 +177,26 @@ def test_an_interrupted_bridge_closes_its_hub_session():
     with pytest.raises(KeyboardInterrupt):
         bridge.start()
     hub.close.assert_called_once()
+
+
+@pytest.mark.parametrize("status", [301, 302, 307, 308])
+def test_a_websocket_redirected_to_another_host_never_gets_the_token(fake, run_bridge, status):
+    """The websockets library follows a redirect to any host; the token is sent in
+    the first frame, so it would go to whoever answers there."""
+    from fake_mattermost import Redirector, TOKEN
+
+    from mattermost_bridge.mattermost import MattermostAPI
+
+    redirector = Redirector(status).start()
+    try:
+        api = MattermostAPI(fake.url, fake.token, websocket_url=redirector.websocket_url, timeout=5)
+        running = run_bridge(api=api, wait_ready=False)
+        assert wait_for(lambda: redirector.handshakes >= 1, timeout=5), \
+            "the redirect was not followed at all; the test proves nothing"
+        assert not wait_for(lambda: [f for f in redirector.received if TOKEN in f], timeout=1)
+        assert wait_for(lambda: redirector.handshakes >= 2, timeout=5), "not retried"
+        assert not [frame for frame in redirector.received if TOKEN in frame]
+        assert not running.bridge.ready()
+        assert running.error is None
+    finally:
+        redirector.stop()

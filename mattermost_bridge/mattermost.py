@@ -97,6 +97,22 @@ def websocket_url_for(base_url: str) -> str:
     return urlunsplit((scheme, parts.netloc, f"{parts.path}{API_PATH}/websocket", "", ""))
 
 
+def websocket_host(websocket_url: str) -> str:
+    """The ``Host`` header a websocket handshake to ``websocket_url`` carries.
+
+    The websockets library follows HTTP redirects during the handshake, to
+    other hosts too. The token goes in the first frame after the handshake,
+    not in a header the library would strip on a cross-origin redirect, so
+    the bridge compares the handshake's final ``Host`` with this before it
+    sends the token (:meth:`HiveMindMattermostBridge._listen`).
+    """
+    from websockets.headers import build_host
+    from websockets.uri import parse_uri
+
+    uri = parse_uri(websocket_url)
+    return build_host(uri.host, uri.port, uri.secure)
+
+
 def ca_bundle() -> str:
     """The CA file both the REST calls and the websocket verify the server with.
 
@@ -258,5 +274,6 @@ class MattermostAPI:
 __all__ = [
     "API_PATH", "DIRECT", "DIRECT_CHANNEL_TYPES", "GROUP_DIRECT", "ID_PATTERN",
     "MattermostAPI", "MattermostError", "Post", "TokenRejected", "ca_bundle",
-    "mention_pattern", "normalise_url", "parse_posted", "websocket_url_for",
+    "mention_pattern", "normalise_url", "parse_posted", "websocket_host",
+    "websocket_url_for",
 ]

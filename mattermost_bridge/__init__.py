@@ -58,6 +58,7 @@ from mattermost_bridge.mattermost import (
     TokenRejected,
     mention_pattern,
     parse_posted,
+    websocket_host,
 )
 
 platform = "HiveMindMattermostBridgeV0.3"
@@ -432,6 +433,15 @@ class HiveMindMattermostBridge:
                                      **options) as websocket:
             self._websocket = websocket
             if self._stopping():
+                return False
+            request = getattr(websocket, "request", None)
+            final_host = request.headers.get("Host") if request is not None else None
+            if final_host != websocket_host(url):
+                # A redirect took the handshake to another host (or port, or
+                # scheme). The token would go to whoever answers there.
+                LOG.error("the Mattermost websocket was redirected to another host; "
+                          "not sending the token there. Set MATTERMOST_URL to the "
+                          "server's own address.")
                 return False
             await websocket.send(json.dumps({
                 "seq": 1,
