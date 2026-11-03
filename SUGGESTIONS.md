@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Review: two suggestions done (reply sender, split), three added (https-only URL, server post limit, operator keys on the termination message).
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Platform state: the operator keys on the termination message and renders the bridge without a network table; the https-only URL check is in the platform API's connector catalog change.
 
 # Suggestions: hivemind-mattermost-bridge
 
@@ -20,17 +20,17 @@ Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Review: two suggestions done (
 - **Proposal:** read the limit at start, or on an HTTP 400 for a long post re-split at 4000 once.
 - **Impact:** low; long answers and old databases are both rare.
 
-## Require https:// for managed bridges
+## Require https:// for managed bridges (in review in the platform API, 2026-11-03)
 
 - **Problem:** `http://` is accepted (with a warning, `is_cleartext`) so local test servers work; a managed bridge pointed at an `http://` server sends the bot's token and every message in the clear.
 - **Proposal:** the platform API that takes the customer's server URL refuses `http://`; optionally a `MATTERMOST_ALLOW_HTTP` switch here that defaults to off outside loopback.
+- **State:** the API check (https, port 443 only, a host name that resolves to public addresses only, checked on create and on every settings edit) is part of thalovant-api#467, in review. The switch here is not made.
 - **Impact:** medium; a one-line validation where the URL enters the platform.
 
-## Key on the termination message, not the exit status
+## Key on the termination message, not the exit status (done in the operator, 2026-11-03)
 
-- **Problem:** a refused token exits 78 here; other chat-bridge forks may use another non-zero status.
-- **Proposal:** the operator treats `token_rejected` in the container's termination message as the signal, whatever the status.
-- **Impact:** low; avoids a per-network special case.
+- **Problem:** a refused token exits 78 here; the Matrix and Twitch forks exit 3.
+- **Done:** the operator reports `TokenRejected` when the bridge container's last termination message is `token_rejected`, whatever the exit status (`BridgeManagerMixin._bridge_token_rejected`, hivemind-k8s-operator#121).
 
 ## Per-person rate limit in the bridge
 
@@ -50,7 +50,7 @@ Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Review: two suggestions done (
 - **Proposal:** pin the base image by digest and build from a constraints file generated in CI; Renovate updates both (and the `mattermost-preview` digest in `ci.yml`).
 - **Impact:** medium; makes a rollback mean something.
 
-## Platform integration
+## Platform integration (done in the operator, 2026-11-03)
 
 - **Proposal:** run the image as the managed bridge workload, like the Telegram and Discord forks: the network needs `MATTERMOST_URL` beside the token, channel ids that are 26-character strings (not numbers), and `MATTERMOST_DM_POLICY` passed through when a deployment wants DMs.
-- **Impact:** high; this is what the fork is for.
+- **Done:** hivemind-k8s-operator#121 keeps no network table. The platform renders `env` (`MATTERMOST_URL`, `MATTERMOST_REQUIRE_MENTION`, `MATTERMOST_SESSION_SCOPE`, `MATTERMOST_DM_POLICY=deny`), `secretEnv` (`MATTERMOST_TOKEN`, mounted as `MATTERMOST_TOKEN_FILE`) and `allowedEnv` (`MATTERMOST_ALLOWED_CHANNELS`), and the operator applies them within guard rails. The Mattermost entry in the platform's connector catalog (channel ids `^[a-z0-9]{26}$`, at most 50; egress 443 only) is in review in thalovant-api#467, hidden until its first version is published.

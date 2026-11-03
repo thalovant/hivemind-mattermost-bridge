@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Adversarial review of main 2a45629c (seven findings fixed); CodeRabbit follow-ups: Retry-After HTTP date (R5), reply channel type bound to what the bridge saw (R4), split replies stop with the bridge (R5).
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Section 1: where the operator runs the bridge, the allow-list and DM policy are always set.
 
 # Audit: hivemind-mattermost-bridge
 
@@ -48,6 +48,7 @@ R7. **Low - `http://` was accepted silently.** Still accepted (local test server
 - **Where:** `mattermost_bridge/__init__.py:165` (`allowed_channels`), `:167` (`auto` allows DMs without a list).
 - **Finding:** with no `MATTERMOST_ALLOWED_CHANNELS`, every channel the bot is in and every DM reaches the hub.
 - **Impact:** anyone who can add the bot to a channel or DM it spends the hub's capacity. A managed deployment always sets the list.
+- **Where the operator runs the bridge (2026-11-03):** the list cannot be empty. The operator refuses a bridge without `allowed` entries, or with more than 50 (`BridgeManagerMixin._bridge_spec_error`, hivemind-k8s-operator#121), and the platform sets `MATTERMOST_DM_POLICY=deny`. No change in this repository.
 
 ## 2. No per-person rate limit in the bridge
 

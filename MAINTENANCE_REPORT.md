@@ -1,8 +1,15 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: CodeRabbit review-body comments on PR #2: reply channel type bound to the bridge's own (Major), split replies stop with the bridge, constructor docstring.
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Docs refresh: test count and the platform state of three suggestions.
 
 # Maintenance report: hivemind-mattermost-bridge
 
 
+
+## 2026-11-03: docs refresh against the platform's state
+
+- **What:** QUICK_FACTS counts 181 tests (it still said 168, the count before the PR #2 review-body fixes). FAQ: the managed deployment mounts both identity keys (Noise and RSA), and the operator reads `token_rejected` whatever the exit status. AUDIT section 1: where the operator runs the bridge, the allow-list cannot be empty and DMs are denied. SUGGESTIONS.md: "Key on the termination message" done in the operator (hivemind-k8s-operator#121 reads `token_rejected`, whatever the exit status); "Platform integration" done by the operator's generic bridge spec (#121), with the Mattermost connector entry (env names, channel id pattern) in review in thalovant-api#467; "Require https://" points at the same API change. No code change.
+- **Checked:** the env names and the channel pattern against thalovant-api#467's `catalog/catalog.yaml` (`chat_apps: mattermost`) and `operator_lib/bridge_manager.py` on hivemind-k8s-operator `main` `0072076`; version `0.3.0` and the entry point still match.
+- **Verification:** `python -m pytest tests -q` with `.[test,e2e]` (Python 3.13; HOME pointed at an empty directory so ovos-config's file watcher has little to watch on this host): 181 passed.
+- **Transparency report:** AI model Claude Opus 5.5 (`claude-opus-5-5`) in Claude Code; compared these docs with the code, the operator and the API sources and edited all five maintainer files (CodeRabbit on PR #3: every change updates each); no human review yet.
 
 ## 2026-11-03: CodeRabbit review-body comments on pull request #2
 
