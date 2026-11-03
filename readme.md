@@ -83,7 +83,9 @@ websocket is open and logged in; 503 otherwise).
 
 When the server refuses the token (HTTP 401, at start or later: revoked,
 bot disabled), the bridge writes `token_rejected` to `/dev/termination-log`
-and exits with status 78. Restarting cannot fix a token.
+and exits with status 78. Restarting cannot fix a token. A revoked token
+does not close the websocket (the server just stops sending on it), so the
+bridge also checks the token every 60 seconds.
 
 ## Every setting
 

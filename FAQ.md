@@ -20,7 +20,7 @@ No. Upstream's `--mail`/`--pswd` login is gone; the bridge uses a bot access tok
 
 ## What does exit status 78 mean?
 
-The Mattermost server answered HTTP 401: the token is wrong, revoked, or the bot is disabled. The bridge writes `token_rejected` to `/dev/termination-log` and stops (`mattermost_bridge/__main__.py`, `main`). Network failures are retried instead.
+The Mattermost server answered HTTP 401: the token is wrong, revoked, or the bot is disabled. The bridge writes `token_rejected` to `/dev/termination-log` and stops (`mattermost_bridge/__main__.py`, `main`). Network failures are retried instead. A token revoked while the bridge runs is found within a minute: the server keeps the websocket open but stops sending on it, so the bridge asks `GET /users/me` every 60 s (`_watch_token`).
 
 ## What does `/readyz` check?
 

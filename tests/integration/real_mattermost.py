@@ -351,11 +351,14 @@ def main() -> int:
                   if s in text]
         check("no message text, reply text or secret in the container log", not leaked, repr(leaked))
 
-        # 6. the token is revoked: the bridge stops with token_rejected
+        # 6. the token is revoked: the bridge stops with token_rejected. The
+        # server keeps the websocket open and just stops sending events, so
+        # this is found by the bridge's periodic token check (60 s) unless the
+        # next post's event beats the revocation and its reply gets the 401.
         server.json("POST", "/users/tokens/revoke", json={"token_id": scene["bot_token_id"]})
         post(scene["allowed"], f"@{scene['bot_username']} q10 after the revocation")
         stopped = wait(lambda: not json.loads(subprocess.run(
-            engine() + ["inspect", name], capture_output=True, text=True).stdout)[0]["State"]["Running"], 90, 1)
+            engine() + ["inspect", name], capture_output=True, text=True).stdout)[0]["State"]["Running"], 150, 1)
         state = json.loads(subprocess.run(engine() + ["inspect", name], capture_output=True,
                                           text=True).stdout)[0]["State"]
         with open(os.path.join(work, "termination-log"), encoding="utf-8") as handle:

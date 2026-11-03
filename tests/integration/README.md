@@ -28,7 +28,7 @@ database) in a container, then `real_mattermost.py`:
 | a reply in the thread under the bot's answer needs no mention | `root_id` of the reply |
 | a mention in `other` and a DM are ignored | followed by a control that is answered |
 | no question, answer or secret in the container log | container log |
-| a revoked token stops the bridge: exit 78, `token_rejected` in the termination log | container state, the mounted termination log |
+| a revoked token stops the bridge: exit 78, `token_rejected` in the termination log (the server keeps the websocket open and goes quiet, so the bridge's 60 s token check finds it) | container state, the mounted termination log |
 | SIGTERM stops it cleanly (exit 0) well inside the grace period | `stop -t 20` |
 
 The bridge reads the websocket in order, so when the control's reply has

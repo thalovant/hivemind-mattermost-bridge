@@ -89,6 +89,7 @@ don't know how to answer that". A reply without `channel` is dropped.
 | Websocket closed or ping timeout | reconnected the same way |
 | Websocket never confirmed with `hello` (30 s) | the token is checked with `GET /users/me`, then reconnected |
 | HTTP 401 on any call | `TokenRejected`: the bridge stops, `token_rejected` goes to `/dev/termination-log`, exit status 78 |
+| Token revoked while connected | the server keeps the websocket open and stops sending events on it; `GET /users/me` every 60 s (`TOKEN_CHECK_INTERVAL`) finds the 401, as above |
 | A reply fails otherwise (HTTP 4xx/5xx, network) | logged with the channel id and status, dropped |
 | Hub refuses the credentials or never completes the handshake | `start()` raises after the bounded retries; exit status 1 |
 | SIGTERM | stops like Ctrl-C: websocket and hub session closed, exit status 0 |
