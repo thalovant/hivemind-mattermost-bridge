@@ -28,16 +28,21 @@ recurring bug across every HiveMind bridge written so far:
 
 Threads: the Mattermost websocket runs on an asyncio loop in the thread
 that called ``start()``. HiveMind's ``speak`` handler runs on the bus
-client's own thread and posts the reply with a blocking REST call, which
-:class:`~mattermost_bridge.mattermost.MattermostAPI` makes thread safe.
+client's own thread and only queues the reply; one sender thread posts the
+queued replies in order, paced, with blocking REST calls that
+:class:`~mattermost_bridge.mattermost.MattermostAPI` makes thread safe. The
+hub's thread never waits on Mattermost.
 """
 import asyncio
 import contextlib
 import json
 import logging
+import queue
+import random
 import threading
+import time
 from collections import OrderedDict
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Tuple
 
 from hivemind_bus_client import (
     HiveMessage,
@@ -53,11 +58,17 @@ from mattermost_bridge.health import HealthServer
 from mattermost_bridge.mattermost import (
     DIRECT,
     DIRECT_CHANNEL_TYPES,
+    MAX_POST_LENGTH,
     MattermostAPI,
     Post,
+    RateLimited,
+    USERNAME_PATTERN,
     TokenRejected,
+    defuse_reply,
     mention_pattern,
     parse_posted,
+    split_post,
+    websocket_host,
 )
 
 platform = "HiveMindMattermostBridgeV0.3"
@@ -79,6 +90,9 @@ SESSION_SCOPES = ("person", "chat")
 #: so whatever the allow-list.
 DM_POLICIES = ("auto", "allow", "deny")
 
+#: Mentions that notify everyone in a channel; never a person's username.
+CHANNEL_WIDE_MENTIONS = frozenset({"all", "channel", "here"})
+
 #: Seconds the server has to confirm the websocket login with its ``hello``.
 HELLO_TIMEOUT = 30
 #: Reconnect backoff, in seconds, doubling from the first to the last.
@@ -86,17 +100,48 @@ RECONNECT_MIN_DELAY = 1
 RECONNECT_MAX_DELAY = 30
 #: How many thread roots the bridge remembers the author of.
 THREAD_ROOT_CACHE_SIZE = 1024
+
+#: Channels whose type the bridge learned from a post it forwarded (least
+#: recently used dropped first). A reply's channel type comes from here, never
+#: from the hub's context.
+SEEN_CHANNEL_MEMORY = 1024
 #: Seconds between checks that the server still accepts the token. Revoking
 #: a token does not close the websocket: the server keeps it open and stops
 #: sending events on it, so without this the bridge would go deaf and stay
 #: "ready".
 TOKEN_CHECK_INTERVAL = 60
 
+#: Replies waiting for the sender thread; a reply beyond this is dropped
+#: (logged), so a hub that answers faster than Mattermost takes posts cannot
+#: grow the bridge's memory without end.
+REPLY_QUEUE_SIZE = 100
+#: Seconds between two posts by the bridge.
+REPLY_INTERVAL = 0.2
+#: Tries per post while the server answers 429 (rate limited).
+RATE_LIMIT_ATTEMPTS = 3
+#: The longest wait a 429 may ask for, in seconds.
+RATE_LIMIT_MAX_WAIT = 30
+#: A reply longer than one post is split; past this many posts it is cut.
+MAX_REPLY_POSTS = 4
+#: What ends a cut reply.
+CUT_MARK = " [...]"
+#: Seconds ``stop()`` gives the queued replies to go out.
+REPLY_DRAIN_TIMEOUT = 5
+
 # The websockets library logs every frame at debug level, the token's
 # authentication challenge and everyone's messages among them. Give it a
 # logger of its own that never goes below warning, whatever the root level.
 _WEBSOCKET_LOG = logging.getLogger("mattermost_bridge.websocket")
 _WEBSOCKET_LOG.setLevel(logging.WARNING)
+
+
+def jittered(delay: float) -> float:
+    """``delay`` times a random factor between 0.5 and 1.5.
+
+    A server restart drops every bridge's websocket at once; without the
+    jitter they would all come back at the same instants, again and again.
+    """
+    return delay * random.uniform(0.5, 1.5)
 
 
 class HiveMindMattermostBridge:
@@ -131,11 +176,13 @@ class HiveMindMattermostBridge:
         lang: default utterance language tag.
         site_id: this bridge's HiveMind site id.
         allowed_channels: if given, only posts in these channel ids are
-            forwarded; everything else is ignored. Direct and group-direct
-            messages follow ``dm_policy`` instead.
-        dm_policy: ``"deny"`` ignores direct and group-direct messages,
-            ``"allow"`` forwards them, ``"auto"`` denies them when
-            ``allowed_channels`` is given and allows them otherwise.
+            forwarded and answered, whatever the channel type (a listed
+            group DM too). Other direct and group-direct messages follow
+            ``dm_policy``.
+        dm_policy: for direct and group-direct messages that are not
+            listed: ``"deny"`` ignores them, ``"allow"`` forwards them,
+            ``"auto"`` denies them when ``allowed_channels`` is given and
+            allows them otherwise.
         require_mention: outside a one-to-one direct message, forward only
             posts that mention the bot (``@botname``) or that reply in a
             thread the bot started. The mention is removed before
@@ -199,6 +246,18 @@ class HiveMindMattermostBridge:
         self._mention = None
         self._roots: "OrderedDict[str, bool]" = OrderedDict()
         self._roots_lock = threading.Lock()
+        # channel id -> the channel type Mattermost gave on a forwarded post
+        self._seen_channels: "OrderedDict[str, Optional[str]]" = OrderedDict()
+        self._seen_lock = threading.Lock()
+        # Replies: queued by the hub's thread, posted by the sender thread.
+        # The count is the bound (the queue itself is unbounded so that the
+        # sender's wake-up on stop always fits).
+        self._outbox: "queue.Queue[Optional[dict]]" = queue.Queue()
+        self._unsent = 0
+        self._unsent_changed = threading.Condition()
+        self._sender: Optional[threading.Thread] = None
+        self._sender_lock = threading.Lock()
+        self._sender_stop = threading.Event()
 
     # ------------------------------------------------------------------
     # lifecycle
@@ -261,6 +320,7 @@ class HiveMindMattermostBridge:
             LOG.exception("error closing HiveMind client")
         self._started = False
         self._connected.clear()
+        self._stop_replies(REPLY_DRAIN_TIMEOUT)
         if self._health is not None:
             self._health.stop()
             self._health = None
@@ -344,9 +404,10 @@ class HiveMindMattermostBridge:
                 self._token_rejected.set()
                 raise
             except Exception as error:
+                wait = jittered(delay)
                 LOG.warning(f"cannot reach Mattermost ({type(error).__name__}); "
-                            f"retrying in {delay} s")
-                await self._sleep(delay)
+                            f"retrying in {wait:.1f} s")
+                await self._sleep(wait)
                 delay = min(delay * 2, RECONNECT_MAX_DELAY)
                 continue
             LOG.info(f"== logged in to Mattermost as @{self.bot_username}")
@@ -387,8 +448,9 @@ class HiveMindMattermostBridge:
                 delay = RECONNECT_MIN_DELAY
             else:
                 await self._check_token()
-            LOG.info(f"reconnecting to Mattermost in {delay} s")
-            await self._sleep(delay)
+            wait = jittered(delay)
+            LOG.info(f"reconnecting to Mattermost in {wait:.1f} s")
+            await self._sleep(wait)
             delay = min(delay * 2, RECONNECT_MAX_DELAY)
 
     async def _watch_token(self) -> None:
@@ -432,6 +494,15 @@ class HiveMindMattermostBridge:
                                      **options) as websocket:
             self._websocket = websocket
             if self._stopping():
+                return False
+            request = getattr(websocket, "request", None)
+            final_host = request.headers.get("Host") if request is not None else None
+            if final_host != websocket_host(url):
+                # A redirect took the handshake to another host (or port, or
+                # scheme). The token would go to whoever answers there.
+                LOG.error("the Mattermost websocket was redirected to another host; "
+                          "not sending the token there. Set MATTERMOST_URL to the "
+                          "server's own address.")
                 return False
             await websocket.send(json.dumps({
                 "seq": 1,
@@ -492,13 +563,9 @@ class HiveMindMattermostBridge:
         if not post.user_id or post.user_id == self.bot_id:
             return
 
-        if post.channel_type in DIRECT_CHANNEL_TYPES:
-            if self.dm_policy == "deny":
-                # Silently: answering every stranger's DM would let anyone
-                # make the bot post, and say that it exists.
-                LOG.debug("ignoring a direct message (dm policy: deny)")
-                return
-        elif self.allowed_channels is not None and post.channel_id not in self.allowed_channels:
+        if not self.may_answer(post.channel_id, post.channel_type):
+            # Silently: answering every stranger's DM would let anyone make
+            # the bot post, and say that it exists.
             LOG.debug(f"ignoring a post in non-allowed channel {post.channel_id}")
             return
 
@@ -510,7 +577,53 @@ class HiveMindMattermostBridge:
             LOG.warning("dropping Mattermost message, not connected to HiveMind")
             return
 
+        self._remember_channel(post.channel_id, post.channel_type)
         self.forward_to_hivemind(text, post)
+
+    def _remember_channel(self, channel_id: str, channel_type: Optional[str]) -> None:
+        with self._seen_lock:
+            self._seen_channels[channel_id] = channel_type
+            self._seen_channels.move_to_end(channel_id)
+            while len(self._seen_channels) > SEEN_CHANNEL_MEMORY:
+                self._seen_channels.popitem(last=False)
+
+    def seen_channel_type(self, channel_id: str) -> Tuple[bool, Optional[str]]:
+        """``(seen, channel_type)``: the type of ``channel_id`` as Mattermost gave it."""
+        with self._seen_lock:
+            if channel_id in self._seen_channels:
+                return True, self._seen_channels[channel_id]
+        return False, None
+
+    def may_reply(self, channel_id: str) -> bool:
+        """Whether a reply the hub sends may go to ``channel_id``.
+
+        The hub's context is not trusted for the channel type: with
+        ``dm_policy="allow"`` a context calling an unlisted public channel
+        ``D`` would get past ``allowed_channels``. A listed channel is
+        answered; otherwise the type comes from the post the bridge itself
+        forwarded from that channel. A channel it never saw is answered only
+        when every channel type would be (no list, and DMs allowed).
+        """
+        if self.allowed_channels is not None and channel_id in self.allowed_channels:
+            return True
+        seen, channel_type = self.seen_channel_type(channel_id)
+        if seen:
+            return self.may_answer(channel_id, channel_type)
+        return self.allowed_channels is None and self.dm_policy == "allow"
+
+    def may_answer(self, channel_id: str, channel_type: Optional[str]) -> bool:
+        """Whether the bridge talks in ``channel_id`` at all, both ways.
+
+        A channel id in ``allowed_channels`` is answered whatever its type
+        (a listed group DM too). Any other direct or group-direct channel
+        follows ``dm_policy``; any other channel is answered only when no
+        list is set.
+        """
+        if self.allowed_channels is not None and channel_id in self.allowed_channels:
+            return True
+        if channel_type in DIRECT_CHANNEL_TYPES:
+            return self.dm_policy == "allow"
+        return self.allowed_channels is None
 
     async def addressed_text(self, post: Post) -> Optional[str]:
         """The text to forward, or ``None`` when the post is not for the bot.
@@ -603,41 +716,159 @@ class HiveMindMattermostBridge:
 
     def _reply(self, text: str, context: dict) -> None:
         channel_id = context.get("channel")
-        if not channel_id:
+        if not channel_id or not isinstance(channel_id, str):
             return
+        if not self.may_reply(channel_id):
+            # The hub only echoes the context of what was forwarded, so this
+            # is a reply to a channel the bridge no longer serves (a reminder
+            # set before the list changed or before a restart) or a context
+            # the hub made up.
+            LOG.warning(f"not replying in non-allowed channel {channel_id}")
+            return
+        seen, channel_type = self.seen_channel_type(channel_id)
+        if not seen:
+            channel_type = context.get("channel_type")  # only decides the @asker prefix
         user = context.get("user") if isinstance(context.get("user"), dict) else {}
-        self.speak(text, channel_id,
-                   root_id=context.get("root_id") or "",
-                   username=user.get("mattermost_username"),
-                   channel_type=context.get("channel_type"))
+        self._queue_reply({
+            "text": text,
+            "channel_id": channel_id,
+            "root_id": context.get("root_id") or "",
+            "username": user.get("mattermost_username"),
+            "channel_type": channel_type,
+        })
+
+    def _queue_reply(self, reply: dict) -> None:
+        """Hand ``reply`` (``speak``'s arguments) to the sender thread; never blocks."""
+        with self._unsent_changed:
+            if self._unsent >= REPLY_QUEUE_SIZE:
+                LOG.warning(f"dropping a reply for channel {reply['channel_id']}: "
+                            f"{REPLY_QUEUE_SIZE} replies are already waiting")
+                return
+            self._unsent += 1
+        self._ensure_sender()
+        self._outbox.put(reply)
+
+    def _ensure_sender(self) -> None:
+        with self._sender_lock:
+            if self._sender is not None and self._sender.is_alive():
+                return
+            self._sender_stop.clear()
+            self._sender = threading.Thread(target=self._send_replies,
+                                            name="mattermost-replies", daemon=True)
+            self._sender.start()
+
+    def _send_replies(self) -> None:
+        """The sender thread: post queued replies in order, ``REPLY_INTERVAL`` apart."""
+        last = None
+        while True:
+            reply = self._outbox.get()
+            if reply is None:
+                return
+            try:
+                if self._sender_stop.is_set() or self._token_rejected.is_set():
+                    continue  # stopping: what is left is dropped
+                if last is not None:
+                    wait = last + REPLY_INTERVAL - time.monotonic()
+                    if wait > 0 and self._sender_stop.wait(wait):
+                        continue
+                self.speak(**reply)
+                last = time.monotonic()
+            except Exception as error:  # the sender must outlive one bad reply
+                LOG.error(f"could not send a reply: {type(error).__name__}")
+            finally:
+                with self._unsent_changed:
+                    self._unsent -= 1
+                    self._unsent_changed.notify_all()
+
+    def flush_replies(self, timeout: float = REPLY_DRAIN_TIMEOUT) -> bool:
+        """Wait until every queued reply was posted (or given up); ``False`` on timeout."""
+        with self._unsent_changed:
+            return self._unsent_changed.wait_for(lambda: self._unsent == 0, timeout)
+
+    def _stop_replies(self, timeout: float) -> None:
+        """Give the queued replies ``timeout`` seconds, drop the rest, end the sender."""
+        sender = self._sender
+        if sender is None:
+            return
+        if not self._token_rejected.is_set() and not self.flush_replies(timeout):
+            LOG.warning("stopping with replies not yet posted; they are dropped")
+        self._sender_stop.set()  # also ends a rate-limit wait
+        self._outbox.put(None)
+        sender.join(2)
+        with self._sender_lock:
+            if self._sender is sender:
+                self._sender = None
 
     def speak(self, text: str, channel_id: str, root_id: str = "",
               username: Optional[str] = None, channel_type: Optional[str] = None) -> None:
         """Post ``text`` in ``channel_id``, in the thread ``root_id`` when given.
 
-        Outside a one-to-one direct message the reply starts with the
-        asker's ``@username``, so in a busy channel it is clear whom it
-        answers. Called from the HiveMind bus's own thread; the REST call is
-        blocking and thread safe.
+        The text is the hub's, so its mentions are broken and its images
+        escaped first (:func:`~mattermost_bridge.mattermost.defuse_reply`):
+        a reply never pings ``@channel``, ``@all``, ``@here``, a group or a
+        person. Outside a one-to-one direct message the reply then starts
+        with the asker's ``@username``, the one mention the bridge makes, so
+        in a busy channel it is clear whom it answers. A reply longer than
+        one post is split, at most ``MAX_REPLY_POSTS`` posts; a post the
+        server rate limits is retried (``RATE_LIMIT_ATTEMPTS``). Blocking:
+        the sender thread calls it (``handle_speak`` only queues).
         """
-        if username and channel_type != DIRECT:
-            text = f"@{username} {text}"
-        # The length, never the text: replies carry what people asked about,
-        # and a debug log is kept, shipped and read far more widely than the chat.
-        LOG.debug(f"Sending message to Mattermost channel {channel_id}: {len(text)} characters")
-        try:
-            post = self.api.create_post(channel_id, text, root_id=root_id)
-        except TokenRejected:
-            LOG.error("Mattermost refused the bot's access token")
-            self._reject_token()
-            return
-        except Exception as error:
-            LOG.error(f"failed to post to Mattermost channel {channel_id}: "
-                      f"{type(error).__name__}: {error}")
-            return
-        if not root_id and isinstance(post, dict) and post.get("id"):
-            # A top-level reply can become a thread; replies in it are for the bot.
-            self._remember_root(str(post["id"]), True)
+        text = defuse_reply(str(text))
+        prefix = ""
+        if (username and channel_type != DIRECT and USERNAME_PATTERN.fullmatch(str(username))
+                and str(username).lower() not in CHANNEL_WIDE_MENTIONS):
+            prefix = f"@{username} "
+        # One post holds MAX_POST_LENGTH characters: a longer reply is split
+        # (the first part names the asker), and past MAX_REPLY_POSTS cut.
+        limit = MAX_POST_LENGTH - len(prefix)
+        parts = split_post(text, limit)
+        if len(parts) > MAX_REPLY_POSTS:
+            LOG.warning(f"a reply of {len(text)} characters is cut to {MAX_REPLY_POSTS} posts")
+            parts = parts[:MAX_REPLY_POSTS]
+            parts[-1] = parts[-1][:limit - len(CUT_MARK)] + CUT_MARK
+        for number, part in enumerate(parts):
+            if self._sender_stop.is_set():
+                # stopping began while an earlier part was in flight
+                LOG.warning(f"stopping: {len(parts) - number} part(s) of a reply not posted")
+                return
+            message = prefix + part if number == 0 else part
+            # The length, never the text: replies carry what people asked about,
+            # and a debug log is kept, shipped and read far more widely than the chat.
+            LOG.debug(f"Sending message to Mattermost channel {channel_id}: "
+                      f"{len(message)} characters")
+            post = self._post(channel_id, message, root_id)
+            if post is None:
+                return
+            if not root_id and post.get("id"):
+                # A top-level reply can become a thread; replies in it are for the bot.
+                self._remember_root(str(post["id"]), True)
+
+    def _post(self, channel_id: str, message: str, root_id: str) -> Optional[dict]:
+        """One post, retried while the server rate limits it; ``None`` when it was not posted."""
+        for attempt in range(1, RATE_LIMIT_ATTEMPTS + 1):
+            try:
+                post = self.api.create_post(channel_id, message, root_id=root_id)
+            except RateLimited as limited:
+                if attempt == RATE_LIMIT_ATTEMPTS:
+                    break
+                wait = min(limited.retry_after, RATE_LIMIT_MAX_WAIT)
+                LOG.warning(f"Mattermost rate limit on channel {channel_id}; "
+                            f"retrying in {wait:.1f} s")
+                if self._sender_stop.wait(wait):
+                    return None
+                continue
+            except TokenRejected:
+                LOG.error("Mattermost refused the bot's access token")
+                self._reject_token()
+                return None
+            except Exception as error:
+                LOG.error(f"failed to post to Mattermost channel {channel_id}: "
+                          f"{type(error).__name__}: {error}")
+                return None
+            return post if isinstance(post, dict) else {}
+        LOG.error(f"failed to post to Mattermost channel {channel_id}: "
+                  f"still rate limited after {RATE_LIMIT_ATTEMPTS} tries")
+        return None
 
 
 # Backwards-compat alias for the old public name.

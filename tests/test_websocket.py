@@ -18,6 +18,7 @@ def test_a_post_on_the_websocket_reaches_the_hub_and_the_reply_comes_back(fake, 
     assert hub.emit.call_args[0][0].payload.data["utterances"] == ["what time is it"]
 
     running.bridge.handle_speak(Message("speak", {"utterance": "It is three."}, context))
+    assert running.bridge.flush_replies(5)
     assert fake.created == [{"channel_id": TOWN_SQUARE, "message": "@alice It is three."}]
 
 
@@ -29,6 +30,7 @@ def test_a_reply_in_a_thread_the_bot_started_is_answered_in_that_thread(fake, ru
     assert wait_for(lambda: hub.emit.called)
     context = hub.emit.call_args[0][0].payload.context
     running.bridge.handle_speak(Message("speak", {"utterance": "Rain."}, context))
+    assert running.bridge.flush_replies(5)
     assert fake.created == [{"channel_id": TOWN_SQUARE, "message": "@alice Rain.", "root_id": root}]
 
 
@@ -177,3 +179,40 @@ def test_an_interrupted_bridge_closes_its_hub_session():
     with pytest.raises(KeyboardInterrupt):
         bridge.start()
     hub.close.assert_called_once()
+
+
+@pytest.mark.parametrize("status", [301, 302, 307, 308])
+def test_a_websocket_redirected_to_another_host_never_gets_the_token(fake, run_bridge, status):
+    """The websockets library follows a redirect to any host; the token is sent in
+    the first frame, so it would go to whoever answers there."""
+    from fake_mattermost import Redirector, TOKEN
+
+    from mattermost_bridge.mattermost import MattermostAPI
+
+    redirector = Redirector(status).start()
+    try:
+        api = MattermostAPI(fake.url, fake.token, websocket_url=redirector.websocket_url, timeout=5)
+        running = run_bridge(api=api, wait_ready=False)
+        assert wait_for(lambda: redirector.handshakes >= 1, timeout=5), \
+            "the redirect was not followed at all; the test proves nothing"
+        assert not wait_for(lambda: [f for f in redirector.received if TOKEN in f], timeout=1)
+        assert wait_for(lambda: redirector.handshakes >= 2, timeout=5), "not retried"
+        assert not [frame for frame in redirector.received if TOKEN in frame]
+        assert not running.bridge.ready()
+        assert running.error is None
+    finally:
+        redirector.stop()
+
+
+def test_reconnect_waits_are_jittered_and_bounded(monkeypatch):
+    import mattermost_bridge
+
+    monkeypatch.setattr(mattermost_bridge.random, "uniform", lambda low, high: high)
+    assert mattermost_bridge.jittered(10) == 15
+    monkeypatch.setattr(mattermost_bridge.random, "uniform", lambda low, high: low)
+    assert mattermost_bridge.jittered(10) == 5
+    monkeypatch.undo()
+    waits = {round(mattermost_bridge.jittered(mattermost_bridge.RECONNECT_MAX_DELAY), 3)
+             for _ in range(50)}
+    assert len(waits) > 1
+    assert all(waits_ <= 1.5 * mattermost_bridge.RECONNECT_MAX_DELAY for waits_ in waits)

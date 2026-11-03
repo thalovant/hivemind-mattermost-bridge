@@ -95,6 +95,7 @@ def test_a_thread_under_the_bots_own_reply_needs_no_lookup(bot):
     api.create_post.return_value = {"id": answer, "user_id": BOT_ID}
     context = forwarded(bridge, hub, posted_event("@hivebot weather?")).context
     bridge.handle_speak(Message("speak", {"utterance": "Sunny."}, context))
+    assert bridge.flush_replies(5)
     assert utterance(bridge, hub, "and tomorrow?", root_id=answer) == "and tomorrow?"
     api.get_post.assert_not_called()
 

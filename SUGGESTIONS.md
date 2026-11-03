@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: First suggestions for the Thalovant fork.
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Review: two suggestions done (reply sender, split), three added (https-only URL, server post limit, operator keys on the termination message).
 
 # Suggestions: hivemind-mattermost-bridge
 
@@ -8,17 +8,29 @@ Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: First suggestions for the Thal
 - **Proposal:** keep the `connection_id` from `hello` and the last `seq`, and reconnect with `?connection_id=...&sequence_number=...` so the server replays what was missed (check which server versions support the resume before relying on it).
 - **Impact:** medium; a server restart no longer loses questions.
 
-## Reply off the bus thread
+## Thread lookups off the websocket reader
 
-- **Problem:** AUDIT.md sections 3 and 4.
-- **Proposal:** hand replies to the asyncio loop (`run_coroutine_threadsafe` + `asyncio.to_thread`) and run thread lookups as tasks, so neither the bus thread nor the websocket reader waits on REST.
-- **Impact:** medium.
+- **Problem:** AUDIT.md section 4 (section 3, replies on the bus thread, was fixed in the review: replies have their own sender thread).
+- **Proposal:** run `_in_bot_thread` lookups as tasks so a slow `GET /posts/{id}` does not hold later events.
+- **Impact:** low.
 
-## Split long replies
+## Learn the server's post limit
 
-- **Problem:** AUDIT.md section 6.
-- **Proposal:** learn the server's maximum post size at start (the client configuration API) and post a long reply as several posts in the same thread.
-- **Impact:** low; long answers are rare.
+- **Problem:** AUDIT.md "Open, found in the review": long replies are split at 16383 characters (`MAX_POST_LENGTH`), which a server with an older database refuses.
+- **Proposal:** read the limit at start, or on an HTTP 400 for a long post re-split at 4000 once.
+- **Impact:** low; long answers and old databases are both rare.
+
+## Require https:// for managed bridges
+
+- **Problem:** `http://` is accepted (with a warning, `is_cleartext`) so local test servers work; a managed bridge pointed at an `http://` server sends the bot's token and every message in the clear.
+- **Proposal:** the platform API that takes the customer's server URL refuses `http://`; optionally a `MATTERMOST_ALLOW_HTTP` switch here that defaults to off outside loopback.
+- **Impact:** medium; a one-line validation where the URL enters the platform.
+
+## Key on the termination message, not the exit status
+
+- **Problem:** a refused token exits 78 here; other chat-bridge forks may use another non-zero status.
+- **Proposal:** the operator treats `token_rejected` in the container's termination message as the signal, whatever the status.
+- **Impact:** low; avoids a per-network special case.
 
 ## Per-person rate limit in the bridge
 

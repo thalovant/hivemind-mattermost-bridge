@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Thalovant fork set up: bot-token client, DM policy, mention gating, managed image.
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Review fixes: reply destination check, mention defusing, long replies.
 
 # FAQ: hivemind-mattermost-bridge
 
@@ -12,7 +12,15 @@ Outside a one-to-one DM, `HiveMindMattermostBridge.addressed_text` forwards only
 
 ## Where does the reply go?
 
-To the question's channel, and into its thread when the question was in one (`root_id` in the utterance context). Outside one-to-one DMs it starts with the asker's `@username` (`HiveMindMattermostBridge.speak`).
+To the question's channel, and into its thread when the question was in one (`root_id` in the utterance context). Outside one-to-one DMs it starts with the asker's `@username` (`HiveMindMattermostBridge.speak`). A reply to a channel the bridge does not serve (off the allow-list, or a DM the policy refuses) is not posted (`may_answer`).
+
+## Can the bot be made to ping @channel or @all?
+
+No. The reply is the hub's text, and an assistant asked to "say @channel ..." will write it, so `defuse_reply` (`mattermost_bridge/mattermost.py`) breaks every mention in it with an invisible U+2060 word joiner before posting: `@channel`, `@all`, `@here`, groups and people are shown but not notified. The only mention the bot makes is the asker's `@username` in front. Markdown images are escaped too, because every reader's client would fetch the image URL.
+
+## Why did a long answer arrive as several posts?
+
+Mattermost takes at most 16383 characters per post (its default `MaxPostSize`). A longer reply is split at a paragraph, line or space (`split_post`), up to 4 posts (`MAX_REPLY_POSTS`), and the rest is cut with ` [...]`. A server configured for less than 16383 answers HTTP 400 and the reply is dropped (logged by status).
 
 ## Does it log email login or password, like upstream?
 

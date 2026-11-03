@@ -15,13 +15,16 @@ Every call sends the token as ``Authorization: Bearer``; nothing here logs a
 token, a message or a reply. A 401 from the server raises
 :class:`TokenRejected`, the one failure no retry can fix.
 """
+import ipaddress
 import json
 import os
 import re
 import ssl
 import threading
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from typing import Any, Dict, List, Optional
 from urllib.parse import quote, urlsplit, urlunsplit
 
 import requests
@@ -63,6 +66,83 @@ class MattermostError(Exception):
         self.status = status
 
 
+class RateLimited(MattermostError):
+    """The server refused a call for its rate limit (HTTP 429); ``retry_after`` seconds to wait."""
+
+    def __init__(self, method: str, endpoint: str, retry_after: float):
+        super().__init__(method, endpoint, 429)
+        self.retry_after = retry_after
+
+
+#: Seconds to wait after a 429 that names no time.
+DEFAULT_RETRY_AFTER = 1.0
+
+
+def _wait_seconds(value: Any, now: datetime) -> Optional[float]:
+    """One header as seconds to wait: a number, or a future HTTP date; None otherwise."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    try:
+        seconds = float(text)
+    except ValueError:
+        # Retry-After may be an HTTP date (RFC 9110): the time to retry at
+        try:
+            when = parsedate_to_datetime(text)
+        except (TypeError, ValueError, IndexError, OverflowError):
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        seconds = (when - now).total_seconds()
+        return seconds if seconds > 0 else None  # a date already past says nothing
+    return seconds if seconds >= 0 else None
+
+
+def retry_after(headers: Any, now: Optional[datetime] = None) -> float:
+    """Seconds a 429 asks to wait: ``Retry-After``, else ``X-Ratelimit-Reset`` (Mattermost sends both).
+
+    Each may be a number of seconds; ``Retry-After`` may also be an HTTP date,
+    which counts until that time. A negative number, a date already past or
+    anything unreadable falls through to the next header, then to
+    ``DEFAULT_RETRY_AFTER``. The caller caps the wait (``RATE_LIMIT_MAX_WAIT``).
+    """
+    now = now or datetime.now(timezone.utc)
+    for name in ("Retry-After", "X-Ratelimit-Reset"):
+        seconds = _wait_seconds(headers.get(name), now)
+        if seconds is not None:
+            return seconds
+    return DEFAULT_RETRY_AFTER
+
+
+#: The longest post Mattermost takes by default (``MaxPostSize``), in
+#: characters (the server counts code points, as ``len`` does).
+MAX_POST_LENGTH = 16383
+
+
+def split_post(text: str, limit: int = MAX_POST_LENGTH) -> List[str]:
+    """``text`` as pieces of at most ``limit`` characters.
+
+    Each cut is at the last paragraph break, else line break, else space in
+    the second half of the piece, and that separator is dropped; a piece
+    with none is cut at ``limit``. Nothing else is changed or lost.
+    """
+    if limit < 1:
+        raise ValueError("limit must be at least 1")
+    parts: List[str] = []
+    while len(text) > limit:
+        cut, skip = limit, 0
+        for separator in ("\n\n", "\n", " "):
+            found = text.rfind(separator, limit // 2, limit + len(separator))
+            if found > 0:
+                cut, skip = found, len(separator)
+                break
+        parts.append(text[:cut])
+        text = text[cut + skip:]
+    if text or not parts:
+        parts.append(text)
+    return parts
+
+
 def normalise_url(url: str) -> str:
     """The server's base URL: ``https://host[:port][/path]``, no trailing slash.
 
@@ -90,11 +170,44 @@ def normalise_url(url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
 
 
+def is_cleartext(base_url: str) -> bool:
+    """Whether ``base_url`` sends the token and every message unencrypted to another machine.
+
+    ``http://`` to a loopback address (a local test server) is not.
+    """
+    parts = urlsplit(base_url)
+    if parts.scheme != "http":
+        return False
+    host = (parts.hostname or "").lower()
+    if host == "localhost" or host.endswith(".localhost"):
+        return False
+    try:
+        return not ipaddress.ip_address(host).is_loopback
+    except ValueError:  # a name, not an address
+        return True
+
+
 def websocket_url_for(base_url: str) -> str:
     """The websocket endpoint of the server at ``base_url`` (``wss://`` for HTTPS)."""
     parts = urlsplit(base_url)
     scheme = "wss" if parts.scheme == "https" else "ws"
     return urlunsplit((scheme, parts.netloc, f"{parts.path}{API_PATH}/websocket", "", ""))
+
+
+def websocket_host(websocket_url: str) -> str:
+    """The ``Host`` header a websocket handshake to ``websocket_url`` carries.
+
+    The websockets library follows HTTP redirects during the handshake, to
+    other hosts too. The token goes in the first frame after the handshake,
+    not in a header the library would strip on a cross-origin redirect, so
+    the bridge compares the handshake's final ``Host`` with this before it
+    sends the token (:meth:`HiveMindMattermostBridge._listen`).
+    """
+    from websockets.headers import build_host
+    from websockets.uri import parse_uri
+
+    uri = parse_uri(websocket_url)
+    return build_host(uri.host, uri.port, uri.secure)
 
 
 def ca_bundle() -> str:
@@ -124,6 +237,34 @@ def mention_pattern(username: str) -> "re.Pattern[str]":
     chars = _USERNAME_CHARS
     return re.compile(rf"(?<![\w@.-])@{re.escape(username)}(?=[._-]*(?![{chars}]))",
                       re.IGNORECASE)
+
+
+#: An ``@`` that Mattermost's mention parser could read as the start of a
+#: mention (``@channel``, ``@all``, ``@here``, a user, a group): one not
+#: preceded by a letter or a digit (``me@example.com`` is an address, but
+#: ``x.@channel`` and ``_@all`` are mentions to the server) and followed by
+#: a character a name can hold.
+_MENTION_START = re.compile(rf"(?<![^\W_])@(?=[{_USERNAME_CHARS}])", re.IGNORECASE)
+#: U+2060 WORD JOINER: invisible, and neither a letter nor a digit, so the
+#: server's parser ends the word there and ``@\u2060channel`` pings no one.
+WORD_JOINER = "\u2060"
+
+
+def defuse_reply(text: str) -> str:
+    """The hub's reply made safe to post as the bot.
+
+    The reply is the hub's text, and the hub writes what it was asked to
+    (an assistant told to "say @channel ..." will): every mention in it is
+    broken with an invisible :data:`WORD_JOINER`, so the bot never notifies
+    a whole channel, a group or a person on someone else's behalf. Markdown
+    images (``![...](...)``) are escaped to plain text, because every
+    client that shows the post would fetch the image URL by itself, which
+    leaks who reads the channel and, from a hub that was talked into
+    putting the conversation in the URL, what was said. The rest of the
+    Markdown (lists, emphasis, code, links) is kept.
+    """
+    text = _MENTION_START.sub("@" + WORD_JOINER, text)
+    return text.replace("![", "!\\[")
 
 
 @dataclass(frozen=True)
@@ -229,6 +370,8 @@ class MattermostAPI:
                                              allow_redirects=False, **kwargs)
         if response.status_code == 401:
             raise TokenRejected()
+        if response.status_code == 429:
+            raise RateLimited(method, endpoint, retry_after(response.headers))
         if response.status_code >= 300:
             raise MattermostError(method, endpoint, response.status_code)
         try:
@@ -257,6 +400,10 @@ class MattermostAPI:
 
 __all__ = [
     "API_PATH", "DIRECT", "DIRECT_CHANNEL_TYPES", "GROUP_DIRECT", "ID_PATTERN",
-    "MattermostAPI", "MattermostError", "Post", "TokenRejected", "ca_bundle",
-    "mention_pattern", "normalise_url", "parse_posted", "websocket_url_for",
+    "MAX_POST_LENGTH", "MattermostAPI", "MattermostError", "Post", "RateLimited",
+    "TokenRejected", "WORD_JOINER", "ca_bundle", "defuse_reply", "is_cleartext",
+    "retry_after",
+    "split_post",
+    "mention_pattern", "normalise_url", "parse_posted", "websocket_host",
+    "websocket_url_for",
 ]

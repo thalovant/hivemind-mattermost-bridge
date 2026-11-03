@@ -83,6 +83,9 @@ class FakeMattermost:
         self.created: List[dict] = []
         self.calls: List[str] = []
         self.auth_attempts = 0
+        #: Answer this many of the next ``POST /posts`` with 429 and ``Retry-After``.
+        self.rate_limit_posts = 0
+        self.retry_after = "0.05"
         self._connections: set = set()
         self._http: Optional[ThreadingHTTPServer] = None
         self._loop = asyncio.new_event_loop()
@@ -199,6 +202,11 @@ class FakeMattermost:
             if post is None:
                 return self._answer(handler, 404, {"status_code": 404})
             return self._answer(handler, 200, post)
+        if method == "POST" and handler.path == "/api/v4/posts" and self.rate_limit_posts > 0:
+            self.rate_limit_posts -= 1
+            return self._answer(handler, 429, {"id": "api.context.rate_limit", "status_code": 429},
+                                headers={"Retry-After": self.retry_after,
+                                         "X-Ratelimit-Reset": self.retry_after})
         if method == "POST" and handler.path == "/api/v4/posts":
             request = json.loads(body or b"{}")
             post = {"id": new_id(), "user_id": BOT_ID, "root_id": request.get("root_id", ""),
@@ -209,9 +217,12 @@ class FakeMattermost:
         return self._answer(handler, 404, {"status_code": 404})
 
     @staticmethod
-    def _answer(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
+    def _answer(handler: BaseHTTPRequestHandler, status: int, payload: dict,
+                headers: Optional[Dict[str, str]] = None) -> None:
         data = json.dumps(payload).encode("utf-8")
         handler.send_response(status)
+        for name, value in (headers or {}).items():
+            handler.send_header(name, value)
         handler.send_header("Content-Type", "application/json")
         handler.send_header("Content-Length", str(len(data)))
         handler.end_headers()
@@ -270,3 +281,62 @@ def wait_for(predicate: Callable[[], bool], timeout: float = 10.0) -> bool:
             return True
         time.sleep(0.02)
     return bool(predicate())
+
+
+class Redirector:
+    """A websocket endpoint that answers every handshake with a redirect, and the place it points to.
+
+    ``elsewhere`` is a second websocket server, standing for another host:
+    it accepts the handshake and records every frame it is sent, so a test
+    can tell whether the bot's token followed the redirect.
+    """
+
+    def __init__(self, status: int = 302):
+        self.status = status
+        self.received: List[str] = []
+        self.handshakes = 0
+        self._loop = asyncio.new_event_loop()
+        self._servers: list = []
+
+    def start(self) -> "Redirector":
+        threading.Thread(target=self._loop.run_forever, daemon=True).start()
+
+        async def serve_both():
+            elsewhere = await serve(self._record, "127.0.0.1", 0, logger=_QUIET)
+            target = f"ws://127.0.0.1:{self._port(elsewhere)}/api/v4/websocket"
+
+            def redirect(connection, request):
+                response = connection.respond(self.status, "moved\n")
+                response.headers["Location"] = target
+                return response
+
+            redirector = await serve(self._record, "127.0.0.1", 0, logger=_QUIET,
+                                     process_request=redirect)
+            return [redirector, elsewhere]
+
+        self._servers = asyncio.run_coroutine_threadsafe(serve_both(), self._loop).result(5)
+        return self
+
+    @staticmethod
+    def _port(server) -> int:
+        return next(iter(server.sockets)).getsockname()[1]
+
+    async def _record(self, websocket) -> None:
+        self.handshakes += 1
+        try:
+            async for frame in websocket:
+                self.received.append(frame if isinstance(frame, str) else frame.decode())
+        except Exception:
+            return
+
+    @property
+    def websocket_url(self) -> str:
+        return f"ws://127.0.0.1:{self._port(self._servers[0])}/api/v4/websocket"
+
+    def stop(self) -> None:
+        async def close():
+            for server in self._servers:
+                server.close()
+                await server.wait_closed()
+        asyncio.run_coroutine_threadsafe(close(), self._loop).result(5)
+        self._loop.call_soon_threadsafe(self._loop.stop)

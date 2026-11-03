@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Bot-token client, settings from the environment and secret files, channel allow-list, DM policy, mention gating, per-person sessions, health endpoints, managed image.
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Review: replies never ping @channel/@all/@here, are split when too long, go only to allowed channels.
 
 # HiveMind Mattermost Bridge
 
@@ -70,7 +70,10 @@ What it answers:
 
 Replies go to the question's channel; a question asked in a thread is
 answered in that thread. Outside a one-to-one DM the reply starts with the
-asker's `@username`.
+asker's `@username`, the only mention the bot ever makes: mentions in the
+hub's answer (`@channel`, `@all`, `@here`, people) are shown but notify no
+one, and Markdown images are shown as text. A reply longer than one post
+(16383 characters) is split, at most four posts.
 
 Each person has their own conversation on the hub in each channel
 (`MATTERMOST_SESSION_SCOPE=person`, the default; session id

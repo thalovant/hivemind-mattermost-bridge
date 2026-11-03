@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Docs index for the fork: bot-token client, managed image, test layers.
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Review: code map names the reply sender and the new helpers.
 
 # hivemind-mattermost-bridge
 
@@ -23,8 +23,8 @@ same channel, and the same thread when the question was in one.
 
 | File | What it holds |
 | --- | --- |
-| `mattermost_bridge/__init__.py` | `HiveMindMattermostBridge`: hub connection (`connect_hivemind`), the websocket loop (`_listen`, reconnect), `handle_posted` (allow-list, DM policy), `addressed_text` (mention gating, bot threads), `session_id`, `ready`, the reply path (`speak`) |
-| `mattermost_bridge/mattermost.py` | `MattermostAPI` (REST v4 with the bot token), `TokenRejected`, `parse_posted`, `mention_pattern`, `normalise_url`, `ca_bundle` |
+| `mattermost_bridge/__init__.py` | `HiveMindMattermostBridge`: hub connection (`connect_hivemind`), the websocket loop (`_listen`, reconnect), `handle_posted` (allow-list, DM policy), `addressed_text` (mention gating, bot threads), `session_id`, `ready`, `may_answer` (allow-list both ways), the reply path (`_queue_reply`, the `_send_replies` thread, `speak`, `_post` with the 429 retry) |
+| `mattermost_bridge/mattermost.py` | `MattermostAPI` (REST v4 with the bot token), `TokenRejected`, `RateLimited`, `parse_posted`, `mention_pattern`, `defuse_reply`, `split_post`, `normalise_url`, `is_cleartext`, `websocket_host`, `ca_bundle` |
 | `mattermost_bridge/__main__.py` | `resolve_options` (flags, environment, `*_FILE` secrets), `write_termination_message`, `stop_on_sigterm`, `main` |
 | `mattermost_bridge/health.py` | `HealthServer`: `/healthz` and `/readyz` |
 | `Dockerfile` | the image: uid 10001, `HOME=/home/bridge`, entrypoint without arguments, read-only root |

@@ -1,6 +1,52 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Thalovant fork set up: bot-token client, managed image, CI, real-server integration, docs set.
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: CodeRabbit review-body comments on PR #2: reply channel type bound to the bridge's own (Major), split replies stop with the bridge, constructor docstring.
 
 # Maintenance report: hivemind-mattermost-bridge
+
+
+
+## 2026-11-03: CodeRabbit review-body comments on pull request #2
+
+These were in the review bodies ("Follow-up Comments"), not in threads.
+
+- **Major, `_reply` (5db3068c L675-684):** a reply was authorised with the `channel_type` from the hub's context; with `dm_policy=allow` a context that called an unlisted public channel `D` or `G` got past `allowed_channels`. `_reply` now asks `may_reply`: a listed channel, or the type Mattermost gave on a post the bridge forwarded from it (`_seen_channels`, bounded by `SEEN_CHANNEL_MEMORY`); a channel not seen since start only when there is no list and DMs are allowed. The hub's type now only picks the `@asker` prefix for a channel the bridge has not seen. Tests: four in `tests/test_bridge.py` (AUDIT R4).
+- **Minor, `speak` (5db3068c L783-791):** a split reply checks `_sender_stop` before each part. Test: `tests/test_replies.py::test_no_part_of_a_split_reply_is_posted_once_stopping_began`.
+- **Docstring (5a69dc9c L173-178):** `allowed_channels` and `dm_policy` describe a listed DM as answered whatever its type, and the DM policy as applying to unlisted DMs only.
+- **Verification:** the five new tests that check changed behaviour failed before the change (the real-DM test passed before and after); `python -m pytest tests -q` (ovos-config file watcher off): 181 passed; ruff clean.
+- **Transparency report:** AI model Claude Opus 5.5 (`claude-opus-5-5`) in Claude Code; applied three automated review-body comments, the code ones with tests; no human review yet.
+
+## 2026-11-03: CodeRabbit on pull request #2
+
+- **Retry-After as an HTTP date** (thread `PRRT_kwDOVg5F3s6y_TFL`): `retry_after` (`mattermost_bridge/mattermost.py`) read only numbers, so a 429 that named its retry time as a date waited the 1 s default and could spend all three tries before that time. It now counts until a future date; a past, current or unreadable value falls through to `X-Ratelimit-Reset`, then to `DEFAULT_RETRY_AFTER`; `_post` still caps the wait at `RATE_LIMIT_MAX_WAIT`. Tests: `tests/test_replies.py::test_a_retry_after_http_date_alone_counts_until_that_time` (6 cases, date only), `::test_a_past_date_falls_back_to_the_reset_header`.
+- **QUICK_FACTS retry count** (thread `PRRT_kwDOVg5F3s6y_TFP`): "tried up to 3 times (retried at most twice)", as `docs/configuration.md` already said.
+- **Verification:** the 7 new tests fail against the previous `mattermost.py`; `python -m pytest tests -q` (ovos-config's file watcher off, no inotify watches left on this host): 175 passed; `ruff check --isolated --select F,E9 .` clean.
+- **Transparency report:** AI model Claude Opus 5.5 (`claude-opus-5-5`) in Claude Code; applied both automated review comments with tests; no human review yet.
+
+## 2026-11-03: adversarial review of `main` (`2a45629c`)
+
+**Why:** the fork's PR #1 was merged without an automated review; the bridge runs as a managed pod (read-only root, uid 10001, secrets as files). Reviewed for secrets, TLS, redirects, reply injection, allow-list bypasses, loops, reconnects, readiness, rate limits, memory, long messages and shutdown, against the chat-bridge contract and the Telegram fork.
+
+**Changes** (branch `fix/review-2026-11-03`, one commit each; AUDIT.md "Fixed in the review" R1-R7)
+
+1. `78a4c2d` The websocket token is never sent after a handshake redirected to another host (`websocket_host`; R1).
+2. `841c71b` Replies: mentions in the hub's text broken so nothing pings `@channel`/`@all`/`@here`/people, Markdown images escaped (`defuse_reply`); one allow-list check both ways (`may_answer`), listed group DMs answered (R2-R4).
+3. `2ae06c1` Replies queued off the hub's thread and posted by one paced sender thread, bounded at 100, 429 retried after `Retry-After`, long replies split (16383 characters, at most 4 posts), queued replies drained on stop (R5).
+4. `fd57e3e` Reconnect waits jittered; warning for an `http://` server URL that is not loopback (R6, R7).
+5. Docs: AUDIT (review section, open findings, sections 3 and 6 closed), SUGGESTIONS, QUICK_FACTS, FAQ, `docs/configuration.md`, this report.
+
+Checked and left as is: no secret in any log line, exception message or argument (REST errors carry method, endpoint and status; websocket errors type and library message, with no token); only `token_rejected` is written to the termination log; TLS verified for REST and websocket (one CA source); REST redirects not followed; bots, webhooks, plugins and system posts dropped before anything else; edits, deletes and reactions are not `posted` events and are ignored; the bridge never joins a channel; the allow-list is by channel id, so a rename changes nothing; thread-root cache bounded (1024); SIGTERM handled as PID 1; `/readyz` false when either the hub handshake or the websocket is down.
+
+**Verification**
+
+- `python -m pytest tests -q` with `.[test,e2e]`, Python 3.12: 168 passed (121 non-e2e before). This host has no inotify watches left, so the run used a wrapper that disables ovos-config's file watcher (as in the first report); CI needs none.
+- Every new test was run with its fix reverted and failed (redirect: 4; reply safety: 9; sender: each of split, pacing, 429, wait cap, bound and drain gutted in turn made `tests/test_replies.py` fail).
+- `ruff check --isolated --select F,E9 .`: clean.
+- Not run locally: `tests/integration/run.sh` against a real Mattermost server and the image smoke test (CI runs both on the pull request). The redirect check and `defuse_reply` were tested against the local stand-in and the mention rules of the server's parser as read, not against a real server's notifications.
+
+**Transparency report**
+
+- **AI model:** Claude Opus 5.5 (`claude-opus-5-5`), in Claude Code.
+- **Actions taken:** reviewed the code; wrote the fixes, the tests and these document changes; ran the test suites and the revert/mutation checks.
+- **Oversight:** asked for by the repository owner through a session lead; the pull request is left open for human review, not merged.
 
 ## 2026-11-03: Thalovant fork
 

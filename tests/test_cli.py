@@ -250,3 +250,26 @@ def test_sigterm_stops_the_bridge_like_ctrl_c(monkeypatch):
     finally:
         signal.signal(signal.SIGTERM, previous)
     assert seen["handler"] is cli.stop_on_sigterm
+
+
+@pytest.mark.parametrize("url, warned", [
+    ("http://chat.example.com", True),
+    ("http://10.0.0.5:8065", True),
+    ("http://127.0.0.1:8065", False),
+    ("http://localhost:8065", False),
+    ("http://[::1]:8065", False),
+    ("https://chat.example.com", False),
+])
+def test_a_cleartext_server_url_is_warned_about(monkeypatch, url, warned):
+    """http:// is accepted (a local test server), but the token would travel in the clear."""
+    from unittest.mock import MagicMock
+
+    import mattermost_bridge.__main__ as cli
+
+    log = MagicMock()
+    monkeypatch.setattr(cli, "LOG", log)
+    monkeypatch.setattr(cli, "connect_mattermost_to_hivemind", lambda **options: None)
+    monkeypatch.setattr("os.environ", {**BASE, "MATTERMOST_URL": url})
+    cli.main([])
+    said = " ".join(str(call.args[0]) for call in log.warning.call_args_list)
+    assert ("unencrypted" in said) is warned
