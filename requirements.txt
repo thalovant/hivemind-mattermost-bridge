@@ -1,4 +1,7 @@
 hivemind-bus-client>=1.0.16a1
-mattermostdriver
 ovos-utils>=0.13.15a1
 ovos-bus-client>=2.9.1a1
+# websockets.asyncio.client, the Mattermost websocket (added in 13.0)
+websockets>=13.0
+# the Mattermost REST calls; already required by ovos-utils
+requests>=2.28
