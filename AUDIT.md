@@ -66,7 +66,12 @@ Evidence: `python -m pytest tests -q` (123 passed, 2026-11-03, Python 3.12 and 3
 - **Where:** `tests/fake_mattermost.py`.
 - **Finding:** the unit and e2e suites run against a local stand-in that mimics the server's REST and websocket behaviour. The real server is exercised by `tests/integration/run.sh` (and the CI `integration` job), pinned to one `mattermost-preview` digest.
 
-## 11. Prerelease dependencies, base image by tag
+## 11. `/tmp` must be writable
+
+- **Where:** a dependency, at import: ovos-config's `LocalConf` (`ovos_config/models.py:34`) takes a `combo_lock` lock, which calls `tempfile.gettempdir()`.
+- **Finding:** on a read-only root with no writable `/tmp` the bridge dies at import with `FileNotFoundError: No usable temporary directory` (seen with `docker run --read-only`; podman adds a `/tmp` tmpfs by default). The managed pod mounts an emptyDir there; the CI smoke test mounts a tmpfs.
+
+## 12. Prerelease dependencies, base image by tag
 
 - **Where:** `requirements.txt:1` (`hivemind-bus-client>=1.0.16a1`), `Dockerfile:1` (`FROM python:3.14-slim`).
 - **Finding:** each build resolves the newest alphas and can pull a different base; images are not reproducible across builds.

@@ -72,7 +72,9 @@ jobs:
           uid="$(docker run --rm --entrypoint id "$image" -u)"
           test "$uid" = "10001" || { echo "the image runs as uid $uid, not 10001"; exit 1; }
           # With no token anywhere the bridge refuses to start, naming the variable.
-          if docker run --rm --read-only -e MATTERMOST_URL=https://chat.example.com "$image" > out.txt 2>&1; then
+          # /tmp is writable, as on the platform: ovos-config's lock (combo_lock)
+          # asks tempfile for a directory at import.
+          if docker run --rm --read-only --tmpfs /tmp -e MATTERMOST_URL=https://chat.example.com "$image" > out.txt 2>&1; then
             echo "started without a token"; cat out.txt; exit 1
           fi
           grep -q "MATTERMOST_TOKEN" out.txt || { echo "the refusal does not name MATTERMOST_TOKEN:"; cat out.txt; exit 1; }
