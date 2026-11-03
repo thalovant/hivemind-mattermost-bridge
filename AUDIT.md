@@ -2,7 +2,7 @@ Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: First audit of the Thalovant f
 
 # Audit: hivemind-mattermost-bridge
 
-Evidence: `python -m pytest tests -q` (121 passed, 2026-11-03, Python 3.14; 119 on 3.12 without the e2e extra), `tests/integration/run.sh` (21/21 against Mattermost 12.0.1 in `mattermost/mattermost-preview` with a real hivemind-core hub), a mutation pass (16 behaviours gutted one at a time, each caught by a test), and reading the code on branch `feat/managed-bridge` (line numbers below refer to it) and upstream `dev` at `8d006eb`.
+Evidence: `python -m pytest tests -q` (121 passed, 2026-11-03, Python 3.12 and 3.14, locally and in CI), `tests/integration/run.sh` (21/21 against Mattermost 12.0.1 in `mattermost/mattermost-preview` with a real hivemind-core hub), a mutation pass (16 behaviours gutted one at a time, each caught by a test), and reading the code on branch `feat/managed-bridge` (line numbers below refer to it) and upstream `dev` at `8d006eb`.
 
 ## Fixed in this fork (upstream `dev` at `8d006eb`)
 

@@ -65,7 +65,10 @@ jobs:
           set -euo pipefail
           image="${IMAGE_NAME}:ci-smoke-${GITHUB_SHA}"
           # The entrypoint is the bridge itself: --help answers and exits 0.
-          docker run --rm "$image" --help | grep -q -- "--health-port"
+          # (Into a file: grep -q stops reading early, and under pipefail the
+          # writer's broken pipe would fail the step.)
+          docker run --rm "$image" --help > help.txt
+          grep -q -- "--health-port" help.txt
           uid="$(docker run --rm --entrypoint id "$image" -u)"
           test "$uid" = "10001" || { echo "the image runs as uid $uid, not 10001"; exit 1; }
           # With no token anywhere the bridge refuses to start, naming the variable.

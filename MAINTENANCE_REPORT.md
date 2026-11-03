@@ -18,12 +18,13 @@ Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Thalovant fork set up: bot-tok
 
 **Verification**
 
-- `python -m pytest tests -q`: 121 passed on Python 3.14 (with `.[test,e2e]`); 119 passed on Python 3.12 (`.[test]`, without the 2 e2e tests). Local runs used a wrapper that disables ovos-config's file watcher, because this host had no inotify watches left; CI needs none.
+- `python -m pytest tests -q` with `.[test,e2e]`: 121 passed on Python 3.12 and on 3.14, locally and in CI (`test (3.12)`, `test (3.14)` on the pull request). Local runs used a wrapper that disables ovos-config's file watcher, because this host had no inotify watches left; CI needs none.
 - Mutation pass: 16 behaviours gutted one at a time (allow-list, DM policy, mention stripping, bot-thread lookup, hello before reading, token check after a failed login, readiness on a dropped socket, thread in replies, bot posts skipped, hub-down drop, per-person sessions, TLS verification, websocket logger level, strict booleans, empty allow-list, termination message): each made a test fail.
 - `ruff check --isolated --select F,E9 .`: clean.
 - Image built locally with podman: `--help` answers; runs as uid 10001; refuses to start without the URL or the token and names the variable, on a read-only root; on a read-only root with tmpfs at `/tmp` and `~/.config/hivemind` it builds the bridge and resolves the Noise key to `/home/bridge/.config/hivemind/unnamed-node_noise.key`. Against a loopback hub and a stand-in server, with the pod's mounts (read-only Noise key, credentials and token files) it answered a mention, wrote `token_rejected` and exited 78 on a wrong token, and logged none of the question, the answer or the token.
 - `tests/integration/run.sh` against Mattermost 12.0.1 (`mattermost/mattermost-preview`) and a real hivemind-core hub: 21/21 checks passed (read-only, uid 10001, no secret in the arguments, `/healthz`, `/readyz`, mention answered top level, thread mention answered in the thread, reply under the bot's answer answered without a mention, unmentioned post, other channel and DM ignored, hub never heard the ignored posts, one session per person per channel, nothing sensitive logged, revoked token -> exit 78 + `token_rejected`, restart with the kept Noise key accepted, SIGTERM -> exit 0 in about 2 s).
-- Not verified: CI on GitHub (it runs on the pull request), a production Mattermost server behind a reverse proxy, a deployment by the platform.
+- CI on the pull request: `test (3.12)`, `test (3.14)` and `integration` (21/21 with docker on the GitHub runner, Mattermost 12.0.1 pinned by digest) passed on the first run; `smoke` failed because `docker run ... --help | grep -q` broke the pipe under `pipefail` (grep stops reading at the first match). Fixed by writing the help to a file.
+- Not verified: a production Mattermost server behind a reverse proxy, a deployment by the platform, the publish steps (they run only on `main`).
 
 **Transparency report**
 
