@@ -1,38 +1,37 @@
-# Grounded in ser9's hivemind-bridge-mattermost.service:
-#   hivemind-mattermost-bridge --mail ... --pswd ... --url ... --tag ...
-#   --host ws://127.0.0.1 --port 5678 --key ... --password ... --lang en-us
-#
-# TODO / real finding: this bridge's own requirements.txt pins
-# "hivemind-bus-client<1.0.0", which conflicts with the current
-# hivemind-bus-client 1.0.13a1 floor used elsewhere in this stack. We do
-# NOT force a newer hivemind-bus-client here — that reintroduces the pip
-# ResolutionImpossible this comment is warning about. This needs an
-# upstream floor bump + relock in the bridge repo itself before the whole
-# stack can run one consistent hivemind-bus-client version. Tracked as a
-# TODO, not silently worked around.
 FROM python:3.14-slim
 
-ENV PIP_NO_CACHE_DIR=1
-RUN pip install --no-cache-dir --pre --upgrade \
-    "hivemind-mattermost-bridge"
+WORKDIR /app
+COPY . /app
 
-COPY wait-for-creds.sh /usr/local/bin/wait-for-creds.sh
-RUN chmod +x /usr/local/bin/wait-for-creds.sh
+# force the current hivemind-bus-client alpha rather than whatever a stale
+# base layer might already have cached, since this bridge depends on the
+# bounded handshake and the current identity/Noise API
+RUN pip install --no-cache-dir --upgrade "hivemind-bus-client>=1.0.16a1" \
+    && pip install --no-cache-dir . \
+    && rm -rf /app
 
-ENV HIVEMIND_HOST=ws://hub \
+# The bridge reads its settings from the environment (MATTERMOST_URL,
+# MATTERMOST_TOKEN, HIVEMIND_ACCESS_KEY, HIVEMIND_PASSWORD, HIVEMIND_HOST,
+# ...), or a secret from the file named by <VARIABLE>_FILE, so no secret is
+# ever passed on the command line where other processes can read it.
+# Nothing secret is baked into the image.
+ENV HOME=/home/bridge \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    HIVEMIND_HOST=ws://127.0.0.1 \
     HIVEMIND_PORT=5678 \
-    HIVEMIND_LANG=en-us \
-    MATTERMOST_URL=mattermost \
-    MATTERMOST_TAG=@hivemind_bridge_bot \
-    MMOST_SCHEME=http \
-    MMOST_PORT=8065 \
-    MMOST_VERIFY=0 \
-    CREDS_DIR=/creds
+    HIVEMIND_SITE_ID=mattermost \
+    HIVEMIND_LANG=en-us
 
-ENTRYPOINT ["/usr/local/bin/wait-for-creds.sh", "mattermost", "--"]
-CMD ["sh", "-c", "exec hivemind-mattermost-bridge \
-  --mail \"$MATTERMOST_EMAIL\" --pswd \"$MATTERMOST_PASSWORD\" \
-  --url \"$MATTERMOST_URL\" --tag \"$MATTERMOST_TAG\" \
-  --host \"$HIVEMIND_HOST\" --port \"$HIVEMIND_PORT\" \
-  --key \"$HIVEMIND_ACCESS_KEY\" --password \"$HIVEMIND_PASSWORD\" \
-  --lang \"$HIVEMIND_LANG\""]
+# An unprivileged user. Its home holds the HiveMind identity
+# (~/.config/hivemind, with the Noise static key as unnamed-node_noise.key),
+# which must persist across restarts: mount a volume or the key there, or the
+# hub sees a new identity key on every start. Nothing else is written, so the
+# root filesystem can be read-only with only that directory and /tmp writable.
+RUN useradd --create-home --uid 10001 --user-group bridge \
+    && mkdir -p /home/bridge/.config/hivemind \
+    && chown -R bridge:bridge /home/bridge
+USER bridge
+WORKDIR /home/bridge
+
+ENTRYPOINT ["hivemind-mattermost-bridge"]

@@ -1,68 +1,65 @@
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Examples for the bot-token client; the standalone echo bot is gone with MMostBot.
+
 # Examples
 
 ## Run the bridge
 
 ```bash
-hivemind-mattermost-bridge \
-  --mail bot@example.com --pswd bot-password \
-  --url chat.example.com --tag @bot --tag @assistant \
-  --host ws://127.0.0.1 --port 5678 \
-  --key your-access-key --password your-hivemind-password
+MATTERMOST_URL=https://chat.example.com \
+MATTERMOST_TOKEN_FILE=/run/secrets/hivebot-token \
+MATTERMOST_ALLOWED_CHANNELS=6ru4o9giafff9fdm56kb5cqmje \
+HIVEMIND_HOST=ws://127.0.0.1 HIVEMIND_ACCESS_KEY=... HIVEMIND_PASSWORD_FILE=/run/secrets/hm-password \
+hivemind-mattermost-bridge
 ```
 
-To embed the bridge in your own code:
+## Embed it
 
 ```python
 from mattermost_bridge import HiveMindMattermostBridge
 
 bridge = HiveMindMattermostBridge(
-    mail="bot@example.com",
-    pswd="bot-password",
-    url="chat.example.com",
-    tags=["@bot", "@assistant"],
-    host="ws://127.0.0.1",
-    port=5678,
+    url="https://chat.example.com",
+    token=open("/run/secrets/hivebot-token").read().strip(),
     key="your-access-key",
     password="your-hivemind-password",
+    host="ws://127.0.0.1",
+    port=5678,
+    allowed_channels=["6ru4o9giafff9fdm56kb5cqmje"],
+    health_port=8080,
 )
-bridge.start()
+bridge.start()   # blocks; raises mattermost_bridge.TokenRejected on a refused token
 ```
 
-## A conversation
+## Conversations
 
-In a channel the bot belongs to:
-
-```
-alice> @bot what time is it?
-bot>   @alice , It is half past three.
-
-alice> @bot set a timer for five minutes
-bot>   @alice , Timer set for five minutes.
-```
-
-A direct message to the bot needs no tag:
+In an allowed channel:
 
 ```
-alice (DM)> what time is it?
-bot (DM)>   @alice , It is half past three.
+alice>  @hivebot what time is it?
+hivebot> @alice It is half past three.
+
+alice>  lunch at noon?                         (not for the bot: no answer)
+
+   └─ alice (in the thread under the bot's answer)> and in Paris?
+      hivebot> @alice It is half past nine.
 ```
 
-## Standalone Mattermost echo bot
+In a thread someone else started, the bot needs the mention, and answers in
+the thread:
 
-`MMostBot` can be used on its own, without HiveMind, to verify Mattermost credentials. See `examples/echobot.py`:
-
-```python
-from mattermost_bridge.mmost import MMostBot
-
-class EchoBot(MMostBot):
-    def handle_direct_message(self, message, sender, channel_id):
-        self.send_message(channel_id, message)
-
-    def handle_mention(self, message, sender, channel_id):
-        self.send_message(channel_id, "@" + sender + " " + message)
-
-bot = EchoBot("bot@example.com", "bot-password", "chat.example.com", tags=["@bot"])
-bot.listen()
+```
+bob>    planning the offsite
+   └─ alice> @hivebot what's the weather on Friday?
+      hivebot> @alice Sunny, 21 degrees.
 ```
 
-If the echo bot replies to your messages, the Mattermost half of the configuration is correct and you can move on to wiring the HiveMind half.
+In a one-to-one DM (when the DM policy allows them), no mention and no
+`@username` prefix:
+
+```
+alice (DM)>   what time is it?
+hivebot (DM)> It is half past three.
+```
+
+With `MATTERMOST_ALLOWED_CHANNELS` set and the DM policy at `auto`, that DM
+gets no answer at all.
