@@ -216,3 +216,24 @@ def test_split_post(text, limit, parts):
     from mattermost_bridge.mattermost import split_post
 
     assert split_post(text, limit) == parts
+
+
+def test_no_part_of_a_split_reply_is_posted_once_stopping_began(fast):
+    """stop() cannot cancel the first part's REST call; the parts after it must not follow."""
+    from mattermost_bridge.mattermost import MAX_POST_LENGTH
+
+    bridge, _, api = bridge_with()
+    first_sent = threading.Event()
+
+    def create_post(channel, message, root_id=""):
+        if not first_sent.is_set():
+            first_sent.set()
+            bridge._sender_stop.wait(5)  # still in flight when shutdown starts
+        return {"id": "x"}
+
+    api.create_post.side_effect = create_post
+    reply(bridge, "word " * (MAX_POST_LENGTH // 2))  # about 2.5 posts
+    assert first_sent.wait(5)
+    bridge._stop_replies(timeout=0)
+    time.sleep(0.2)
+    assert api.create_post.call_count == 1

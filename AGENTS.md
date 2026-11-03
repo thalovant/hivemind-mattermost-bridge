@@ -150,7 +150,10 @@ inventing a new pattern here.
   around `defuse_reply`. The one exception to verbatim is the fixed fallback
   line on `hive.complete_intent_failure`.
 - **Replies go only where questions may come from.** `may_answer` is the one
-  allow-list / DM-policy check, used by `handle_posted` and `_reply` alike.
+  allow-list / DM-policy check, used by `handle_posted` and (through
+  `may_reply`) `_reply` alike. A reply's channel type comes from
+  `seen_channel_type` (what Mattermost said on a forwarded post), never from
+  the hub's context.
 - **The websocket token goes to the configured host only.** `_listen`
   compares the handshake's final `Host` with `websocket_host(url)` before
   the `authentication_challenge`; the websockets library follows redirects

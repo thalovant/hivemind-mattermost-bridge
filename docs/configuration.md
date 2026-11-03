@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: CodeRabbit on PR #2: Retry-After as an HTTP date.
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: CodeRabbit review bodies on PR #2: a reply's channel type is the bridge's own, not the hub's; split replies stop with the bridge; Retry-After HTTP date.
 
 # Configuration reference
 
@@ -82,8 +82,14 @@ The hub echoes the context on `speak`. `handle_speak` only queues the reply
 thread posts queued replies in order, `REPLY_INTERVAL` (0.2 s) apart, with
 `speak()`:
 
-1. Dropped: a reply without `channel`, or to a channel `may_answer` refuses
-   (the same allow-list and DM policy as for questions).
+1. Dropped: a reply without `channel`, or to a channel `may_reply` refuses:
+   a listed channel is answered; any other is judged by `may_answer` (the
+   same allow-list and DM policy as for questions) with the channel type
+   Mattermost gave on a post the bridge forwarded from it, never the type in
+   the hub's context (which could call a public channel a DM). A channel the
+   bridge has not seen since it started is answered only when every channel
+   would be: no allow-list and DMs allowed. A split reply posts no further
+   part once the bridge is stopping.
 2. `defuse_reply`: every mention in the hub's text is broken with an
    invisible U+2060 word joiner, so a reply never notifies `@channel`,
    `@all`, `@here`, a group or a person (`me@example.com` is left alone);

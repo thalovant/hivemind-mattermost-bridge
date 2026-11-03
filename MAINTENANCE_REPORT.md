@@ -1,7 +1,18 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: CodeRabbit on PR #2: Retry-After HTTP date parsed; QUICK_FACTS retry count corrected.
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: CodeRabbit review-body comments on PR #2: reply channel type bound to the bridge's own (Major), split replies stop with the bridge, constructor docstring.
 
 # Maintenance report: hivemind-mattermost-bridge
 
+
+
+## 2026-11-03: CodeRabbit review-body comments on pull request #2
+
+These were in the review bodies ("Follow-up Comments"), not in threads.
+
+- **Major, `_reply` (5db3068c L675-684):** a reply was authorised with the `channel_type` from the hub's context; with `dm_policy=allow` a context that called an unlisted public channel `D` or `G` got past `allowed_channels`. `_reply` now asks `may_reply`: a listed channel, or the type Mattermost gave on a post the bridge forwarded from it (`_seen_channels`, bounded by `SEEN_CHANNEL_MEMORY`); a channel not seen since start only when there is no list and DMs are allowed. The hub's type now only picks the `@asker` prefix for a channel the bridge has not seen. Tests: four in `tests/test_bridge.py` (AUDIT R4).
+- **Minor, `speak` (5db3068c L783-791):** a split reply checks `_sender_stop` before each part. Test: `tests/test_replies.py::test_no_part_of_a_split_reply_is_posted_once_stopping_began`.
+- **Docstring (5a69dc9c L173-178):** `allowed_channels` and `dm_policy` describe a listed DM as answered whatever its type, and the DM policy as applying to unlisted DMs only.
+- **Verification:** the five new tests that check changed behaviour failed before the change (the real-DM test passed before and after); `python -m pytest tests -q` (ovos-config file watcher off): 181 passed; ruff clean.
+- **Transparency report:** AI model Claude Opus 5.5 (`claude-opus-5-5`) in Claude Code; applied three automated review-body comments, the code ones with tests; no human review yet.
 
 ## 2026-11-03: CodeRabbit on pull request #2
 

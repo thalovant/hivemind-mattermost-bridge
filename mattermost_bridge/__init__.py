@@ -42,7 +42,7 @@ import random
 import threading
 import time
 from collections import OrderedDict
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Tuple
 
 from hivemind_bus_client import (
     HiveMessage,
@@ -100,6 +100,11 @@ RECONNECT_MIN_DELAY = 1
 RECONNECT_MAX_DELAY = 30
 #: How many thread roots the bridge remembers the author of.
 THREAD_ROOT_CACHE_SIZE = 1024
+
+#: Channels whose type the bridge learned from a post it forwarded (least
+#: recently used dropped first). A reply's channel type comes from here, never
+#: from the hub's context.
+SEEN_CHANNEL_MEMORY = 1024
 #: Seconds between checks that the server still accepts the token. Revoking
 #: a token does not close the websocket: the server keeps it open and stops
 #: sending events on it, so without this the bridge would go deaf and stay
@@ -171,11 +176,13 @@ class HiveMindMattermostBridge:
         lang: default utterance language tag.
         site_id: this bridge's HiveMind site id.
         allowed_channels: if given, only posts in these channel ids are
-            forwarded; everything else is ignored. Direct and group-direct
-            messages follow ``dm_policy`` instead.
-        dm_policy: ``"deny"`` ignores direct and group-direct messages,
-            ``"allow"`` forwards them, ``"auto"`` denies them when
-            ``allowed_channels`` is given and allows them otherwise.
+            forwarded and answered, whatever the channel type (a listed
+            group DM too). Other direct and group-direct messages follow
+            ``dm_policy``.
+        dm_policy: for direct and group-direct messages that are not
+            listed: ``"deny"`` ignores them, ``"allow"`` forwards them,
+            ``"auto"`` denies them when ``allowed_channels`` is given and
+            allows them otherwise.
         require_mention: outside a one-to-one direct message, forward only
             posts that mention the bot (``@botname``) or that reply in a
             thread the bot started. The mention is removed before
@@ -239,6 +246,9 @@ class HiveMindMattermostBridge:
         self._mention = None
         self._roots: "OrderedDict[str, bool]" = OrderedDict()
         self._roots_lock = threading.Lock()
+        # channel id -> the channel type Mattermost gave on a forwarded post
+        self._seen_channels: "OrderedDict[str, Optional[str]]" = OrderedDict()
+        self._seen_lock = threading.Lock()
         # Replies: queued by the hub's thread, posted by the sender thread.
         # The count is the bound (the queue itself is unbounded so that the
         # sender's wake-up on stop always fits).
@@ -567,7 +577,39 @@ class HiveMindMattermostBridge:
             LOG.warning("dropping Mattermost message, not connected to HiveMind")
             return
 
+        self._remember_channel(post.channel_id, post.channel_type)
         self.forward_to_hivemind(text, post)
+
+    def _remember_channel(self, channel_id: str, channel_type: Optional[str]) -> None:
+        with self._seen_lock:
+            self._seen_channels[channel_id] = channel_type
+            self._seen_channels.move_to_end(channel_id)
+            while len(self._seen_channels) > SEEN_CHANNEL_MEMORY:
+                self._seen_channels.popitem(last=False)
+
+    def seen_channel_type(self, channel_id: str) -> Tuple[bool, Optional[str]]:
+        """``(seen, channel_type)``: the type of ``channel_id`` as Mattermost gave it."""
+        with self._seen_lock:
+            if channel_id in self._seen_channels:
+                return True, self._seen_channels[channel_id]
+        return False, None
+
+    def may_reply(self, channel_id: str) -> bool:
+        """Whether a reply the hub sends may go to ``channel_id``.
+
+        The hub's context is not trusted for the channel type: with
+        ``dm_policy="allow"`` a context calling an unlisted public channel
+        ``D`` would get past ``allowed_channels``. A listed channel is
+        answered; otherwise the type comes from the post the bridge itself
+        forwarded from that channel. A channel it never saw is answered only
+        when every channel type would be (no list, and DMs allowed).
+        """
+        if self.allowed_channels is not None and channel_id in self.allowed_channels:
+            return True
+        seen, channel_type = self.seen_channel_type(channel_id)
+        if seen:
+            return self.may_answer(channel_id, channel_type)
+        return self.allowed_channels is None and self.dm_policy == "allow"
 
     def may_answer(self, channel_id: str, channel_type: Optional[str]) -> bool:
         """Whether the bridge talks in ``channel_id`` at all, both ways.
@@ -676,19 +718,23 @@ class HiveMindMattermostBridge:
         channel_id = context.get("channel")
         if not channel_id or not isinstance(channel_id, str):
             return
-        if not self.may_answer(channel_id, context.get("channel_type")):
+        if not self.may_reply(channel_id):
             # The hub only echoes the context of what was forwarded, so this
             # is a reply to a channel the bridge no longer serves (a reminder
-            # set before the list changed) or a context the hub made up.
+            # set before the list changed or before a restart) or a context
+            # the hub made up.
             LOG.warning(f"not replying in non-allowed channel {channel_id}")
             return
+        seen, channel_type = self.seen_channel_type(channel_id)
+        if not seen:
+            channel_type = context.get("channel_type")  # only decides the @asker prefix
         user = context.get("user") if isinstance(context.get("user"), dict) else {}
         self._queue_reply({
             "text": text,
             "channel_id": channel_id,
             "root_id": context.get("root_id") or "",
             "username": user.get("mattermost_username"),
-            "channel_type": context.get("channel_type"),
+            "channel_type": channel_type,
         })
 
     def _queue_reply(self, reply: dict) -> None:
@@ -781,6 +827,10 @@ class HiveMindMattermostBridge:
             parts = parts[:MAX_REPLY_POSTS]
             parts[-1] = parts[-1][:limit - len(CUT_MARK)] + CUT_MARK
         for number, part in enumerate(parts):
+            if self._sender_stop.is_set():
+                # stopping began while an earlier part was in flight
+                LOG.warning(f"stopping: {len(parts) - number} part(s) of a reply not posted")
+                return
             message = prefix + part if number == 0 else part
             # The length, never the text: replies carry what people asked about,
             # and a debug log is kept, shipped and read far more widely than the chat.
