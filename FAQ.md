@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Review fixes: reply destination check, mention defusing, long replies.
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: The managed deployment mounts both identity keys; the operator keys a rejected token on the termination message.
 
 # FAQ: hivemind-mattermost-bridge
 
@@ -28,7 +28,7 @@ No. Upstream's `--mail`/`--pswd` login is gone; the bridge uses a bot access tok
 
 ## What does exit status 78 mean?
 
-The Mattermost server answered HTTP 401: the token is wrong, revoked, or the bot is disabled. The bridge writes `token_rejected` to `/dev/termination-log` and stops (`mattermost_bridge/__main__.py`, `main`). Network failures are retried instead. A token revoked while the bridge runs is found within a minute: the server keeps the websocket open but stops sending on it, so the bridge asks `GET /users/me` every 60 s (`_watch_token`).
+The Mattermost server answered HTTP 401: the token is wrong, revoked, or the bot is disabled. The bridge writes `token_rejected` to `/dev/termination-log` and stops (`mattermost_bridge/__main__.py`, `main`). Network failures are retried instead. A token revoked while the bridge runs is found within a minute: the server keeps the websocket open but stops sending on it, so the bridge asks `GET /users/me` every 60 s (`_watch_token`). The operator reads the termination message, not the status, so `token_rejected` is reported as `TokenRejected` whatever the exit status (hivemind-k8s-operator#121).
 
 ## What does `/readyz` check?
 
@@ -36,7 +36,7 @@ That the HiveMind session is live (the client's `handshake_event`) and that the 
 
 ## Why must the Noise key stay the same?
 
-The hub pins the bridge's Noise static key (`~/.config/hivemind/unnamed-node_noise.key`) on first contact and refuses a different one; `tests/integration/run.sh` saw exactly that when a run started a second container with a new key. Mount the kept key there.
+The hub pins the bridge's Noise static key (`~/.config/hivemind/unnamed-node_noise.key`) on first contact and refuses a different one; `tests/integration/run.sh` saw exactly that when a run started a second container with a new key. Mount the kept key there. The RSA identity beside it (`unnamed-node.pem`) is not refused when it changes, but the hub warns on each new one. Where the operator runs the bridge, both keys come read-only from the bridge's credentials Secret (hivemind-k8s-operator#122).
 
 ## Which channel ids go in `MATTERMOST_ALLOWED_CHANNELS`?
 
