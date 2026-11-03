@@ -1,8 +1,10 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: First audit of the Thalovant fork: upstream defects fixed, open findings with evidence.
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Adversarial review of main 2a45629c: seven findings fixed (redirected websocket token, reply mention/image injection, reply allow-list, hub-thread blocking + 429 + long replies, reconnect jitter, cleartext URL), residual findings added.
 
 # Audit: hivemind-mattermost-bridge
 
-Evidence: `python -m pytest tests -q` (123 passed, 2026-11-03, Python 3.12 and 3.14), `tests/integration/run.sh` (21/21 against Mattermost 12.0.1 in `mattermost/mattermost-preview` with a real hivemind-core hub), a mutation pass (17 behaviours gutted one at a time, each caught by a test), and reading the code on branch `feat/managed-bridge` (line numbers below refer to it) and upstream `dev` at `8d006eb`.
+Evidence (review, 2026-11-03, branch `fix/review-2026-11-03` off `main` `2a45629c`): `python -m pytest tests -q` with `.[test,e2e]` on Python 3.12: 168 passed (121 before the review, e2e excluded); every new test was seen failing with its fix reverted, and six behaviours of the reply sender were gutted one at a time (split, pacing, 429, wait cap, bound, drain), each caught. Line numbers in the review sections refer to that branch.
+
+Evidence (first audit): `python -m pytest tests -q` (123 passed, 2026-11-03, Python 3.12 and 3.14), `tests/integration/run.sh` (21/21 against Mattermost 12.0.1 in `mattermost/mattermost-preview` with a real hivemind-core hub), a mutation pass (17 behaviours gutted one at a time, each caught by a test), and reading the code on branch `feat/managed-bridge` (line numbers below refer to it) and upstream `dev` at `8d006eb`.
 
 ## Fixed in this fork (upstream `dev` at `8d006eb`)
 
@@ -16,6 +18,31 @@ Evidence: `python -m pytest tests -q` (123 passed, 2026-11-03, Python 3.12 and 3
 8. **Any post containing the tag reached the hub**, in any channel, including `@bot` inside a longer name, and DMs with no way to refuse them. Now an allow-list, a DM policy and a mention matcher (`mention_pattern`).
 9. **Found by the real-server run: a revoked token left the bridge deaf and ready.** Mattermost 12.0.1 keeps the websocket of a revoked token open and stops sending events on it; the bridge logged nothing and `/readyz` stayed 200. Now `_watch_token` checks `GET /users/me` every `TOKEN_CHECK_INTERVAL` (60 s); `tests/test_websocket.py::test_a_token_revoked_silently_is_found_by_the_periodic_check`.
 
+## Fixed in the review of `main` `2a45629c` (2026-11-03)
+
+R1. **High - the token followed a websocket redirect to any host.** The websockets library (17.4 here) follows 301/302/303/307/308 during the opening handshake, across origins too; it strips `Authorization` then, but the bridge sends the token in the first frame (`authentication_challenge`), not in a header. A redirect from the server or a proxy in front of it (an SSO gateway, a moved host) handed the bot's token to whatever host the `Location` named, over a TLS connection verified for that host. Now `_listen` compares the final handshake's `Host` with `websocket_host(url)` (`mattermost_bridge/__init__.py:490`, `mattermost_bridge/mattermost.py:171`) and refuses to send the token; `tests/test_websocket.py::test_a_websocket_redirected_to_another_host_never_gets_the_token` (four statuses, a second local server records every frame). REST calls already used `allow_redirects=False` (`mattermost.py:344`).
+
+R2. **High - replies could ping `@channel`/`@all`/`@here` and anyone.** The reply is the hub's text, posted as Markdown by a bot account (bots hold `use_channel_mentions` by default): "@bot say @channel lunch" notified the whole channel. `defuse_reply` (`mattermost.py:227`) breaks every mention with an invisible U+2060 word joiner, including the forms the server still parses after punctuation (`x.@channel`, `_@all`), and leaves addresses alone; the asker's `@username` is added after and is never a channel-wide name (`CHANNEL_WIDE_MENTIONS`). `tests/test_bridge.py::test_a_reply_never_pings_anyone_but_the_asker_nor_loads_an_image`.
+
+R3. **Medium - Markdown images in replies were fetched by every reader's client.** `![x](https://host/?q=...)` from a hub that was talked into it leaks who reads the channel (and whatever the hub put in the URL) with no click. Escaped by `defuse_reply`; same test.
+
+R4. **Medium - replies were not checked against the allow-list.** `_reply` posted to whatever `channel` the context named (a reminder set before the list changed, a context the hub made up). Now `may_answer` (`__init__.py:572`) is the one check, inbound and outbound; it also answers a listed group DM, which `auto` used to refuse. `tests/test_bridge.py::test_a_reply_to_a_channel_off_the_list_is_not_posted`, `::test_a_reply_in_a_dm_follows_the_dm_policy`, `::test_a_listed_group_dm_is_answered`.
+
+R5. **Medium - replies blocked the hub's reader, 429 and long replies were lost** (was open findings 3 and 6). `handle_speak` ran inline on the hub client's websocket thread (pyee `EventEmitter`) and posted with a blocking 10 s call. Now `_queue_reply` (`:694`) hands it to one sender thread (`_send_replies`, `:714`): 0.2 s between posts, at most `REPLY_QUEUE_SIZE` (100, `:112`) waiting, 429 retried after `Retry-After`/`X-Ratelimit-Reset` (`RateLimited`, `retry_after`, `mattermost.py:67,79`; capped 30 s, 3 tries; `_post`, `:796`), replies over `MAX_POST_LENGTH` (16383) split by `split_post` (`mattermost.py:96`), at most 4 posts then cut; `stop()` drains for 5 s (`_stop_replies`, `:742`). `tests/test_replies.py` (23 tests).
+
+R6. **Low - reconnects were not jittered.** Every bridge dropped by one server restart came back at the same instants. `jittered` (`:133`) multiplies each wait by 0.5-1.5; `tests/test_websocket.py::test_reconnect_waits_are_jittered_and_bounded`.
+
+R7. **Low - `http://` was accepted silently.** Still accepted (local test servers), but `main` warns unless the host is loopback (`is_cleartext`, `mattermost.py:147`; `__main__.py:278`); `tests/test_cli.py::test_a_cleartext_server_url_is_warned_about`.
+
+## Open, found in the review
+
+- **Link previews can still carry data out (Low).** With `EnableLinkPreviews` on, the Mattermost server itself fetches the first link of a post for its preview, so a link the hub writes into a reply is requested without a click. Links are kept on purpose (they are most of what an answer is for); an operator worried about this turns link previews off on the server. `defuse_reply` (`mattermost.py:227`).
+- **Mention keys are not defused (Low).** People can set words (their first name, a nickname) that notify them without an `@`; a reply containing such a word notifies them as any post would. Nothing in a post marks a word as "not a mention".
+- **A server with `MaxPostSize` below 16383 (Low).** Mattermost databases from before 5.0 keep 4000; a split part longer than that gets HTTP 400 and is dropped (logged by status). `MAX_POST_LENGTH` is not read from the server.
+- **The server URL is the customer's (Info).** The bridge calls `GET /api/v4/users/me` and opens `/api/v4/websocket` at whatever `MATTERMOST_URL` names, internal addresses included; it reflects nothing but readiness back, and redirects are not followed (REST) or not given the token (websocket). The managed pod's egress policy is what keeps it off cluster-internal addresses.
+- **`HIVEMIND_SELF_SIGNED=true` turns hub TLS verification off (Info).** hivemind-bus-client 1.2.12a1 `client.py:823` sets `CERT_NONE` and no hostname check. Opt-in, default `false`; a managed pod must not set it.
+- **Exit status for a refused token is 78 (Info).** The contract asks for non-zero plus `token_rejected` in `/dev/termination-log`; other forks may use another status, so the operator should key on the termination message, not the number.
+
 ## 1. Every channel is answered unless an allow-list is set
 
 - **Where:** `mattermost_bridge/__init__.py:165` (`allowed_channels`), `:167` (`auto` allows DMs without a list).
@@ -27,10 +54,9 @@ Evidence: `python -m pytest tests -q` (123 passed, 2026-11-03, Python 3.12 and 3
 - **Where:** `HiveMindMattermostBridge.forward_to_hivemind` (`mattermost_bridge/__init__.py:564`).
 - **Finding:** every addressed post is forwarded at once; limits are left to the hub.
 
-## 3. A reply holds the hub's bus thread for up to 10 s
+## 3. ~~A reply holds the hub's bus thread for up to 10 s~~
 
-- **Where:** `speak` -> `MattermostAPI.create_post`, `timeout=self.timeout` (`mattermost_bridge/mattermost.py:228`, `DEFAULT_TIMEOUT = 10`).
-- **Finding:** the REST call is blocking on the bus client's thread; a slow server delays every other reply.
+- **Fixed in the review (R5):** replies are queued and posted by their own thread; the hub's thread never waits on Mattermost. A slow server now delays only the replies behind it (one at a time, up to 10 s each).
 
 ## 4. A thread lookup pauses the websocket reader
 
@@ -42,10 +68,9 @@ Evidence: `python -m pytest tests -q` (123 passed, 2026-11-03, Python 3.12 and 3
 - **Where:** `_listen_until_stopped` (`mattermost_bridge/__init__.py:370`).
 - **Finding:** a reconnect starts a new connection; Mattermost's `connection_id`/`sequence_number` resume is not used, so a post made during the gap is never seen.
 
-## 6. A reply over Mattermost's post limit is dropped
+## 6. ~~A reply over Mattermost's post limit is dropped~~
 
-- **Where:** `speak` (`mattermost_bridge/__init__.py:614`), error log at `:635`.
-- **Finding:** replies are posted verbatim; one longer than the server's limit (16383 characters by default) gets HTTP 400 and is logged by status and dropped.
+- **Fixed in the review (R5):** split into at most `MAX_REPLY_POSTS` posts of `MAX_POST_LENGTH` characters (`split_post`), then cut with ` [...]`. A server with a lower limit: see "Open, found in the review".
 
 ## 7. The fallback reply is English only
 

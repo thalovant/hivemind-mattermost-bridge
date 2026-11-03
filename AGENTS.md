@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Thalovant fork section; repo rules follow the bot-token client, the DM policy and the managed image.
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Review: replies are defused (mentions, images) and posted by a sender thread; rules updated.
 
 # This is the Thalovant fork
 
@@ -141,10 +141,20 @@ inventing a new pattern here.
   `TokenRejected` on HTTP 401; the bridge stops, `__main__` writes
   `token_rejected` to `/dev/termination-log` and exits 78. Do not retry a
   401. Network failures, by contrast, are retried with backoff.
-- **Return upstream responses verbatim.** `speak()` posts
-  `message.data["utterance"]` unmodified, with only the asker's `@username`
-  in front outside one-to-one DMs. The one exception is the fixed fallback
+- **Return upstream responses verbatim, defused.** `speak()` posts
+  `message.data["utterance"]` with no rewording, but always through
+  `defuse_reply` first: mentions broken with U+2060 (no `@channel`, `@all`,
+  `@here`, group or person is ever notified by the bot) and Markdown images
+  escaped. The asker's `@username` goes in front outside one-to-one DMs;
+  a reply longer than one post is split (`split_post`). Never post hub text
+  around `defuse_reply`. The one exception to verbatim is the fixed fallback
   line on `hive.complete_intent_failure`.
+- **Replies go only where questions may come from.** `may_answer` is the one
+  allow-list / DM-policy check, used by `handle_posted` and `_reply` alike.
+- **The websocket token goes to the configured host only.** `_listen`
+  compares the handshake's final `Host` with `websocket_host(url)` before
+  the `authentication_challenge`; the websockets library follows redirects
+  to other hosts by itself.
 - **Never log what people wrote, what the hub answered, or a token.** Log
   lengths, ids and exception type names. The websocket library gets its own
   logger pinned at WARNING (`_WEBSOCKET_LOG`): at debug it prints frames,
@@ -153,6 +163,8 @@ inventing a new pattern here.
 - **Threads.** The Mattermost websocket runs on an asyncio loop in the thread
   that called `start()`; blocking REST calls on that loop go through
   `asyncio.to_thread`. HiveMind's `speak` handler runs on the bus client's
-  thread and posts with a blocking REST call; `MattermostAPI` serialises
-  its `requests.Session` with a lock. A new path between the two keeps
-  that shape.
+  websocket thread and only queues (`_queue_reply`, bounded at
+  `REPLY_QUEUE_SIZE`); the `mattermost-replies` thread posts, paced, with
+  blocking REST calls and the 429 retry. Never post from the bus thread.
+  `MattermostAPI` serialises its `requests.Session` with a lock. A new path
+  between the two keeps that shape.
