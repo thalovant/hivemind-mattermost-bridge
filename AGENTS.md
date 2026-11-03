@@ -1,3 +1,32 @@
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Thalovant fork section; repo rules follow the bot-token client, the DM policy and the managed image.
+
+# This is the Thalovant fork
+
+The rules in this section win over anything below them, which is upstream's
+guidance kept for context:
+
+- Default branch is `main`. Branch from `main`, open a PR into `main`.
+- Commit under your own identity; the upstream identity rule does not apply.
+- Nothing here publishes to PyPI or to upstream's registry. CI
+  (`.github/workflows/ci.yml`) tests every PR and, on `main`, publishes a
+  signed image to `ghcr.io/thalovant/hivemind-mattermost-bridge`.
+- Every change to the bridge's behaviour keeps a test that fails without it
+  and passes with it. A documentation or workflow change has no behaviour to
+  test: it is validated by the build, the lint selection and, for the
+  workflow, a CI run on the pull request.
+- A change to the Mattermost client, the image or the environment contract
+  also runs `tests/integration/run.sh`: the image against a real Mattermost
+  server and a real hub (CI runs it on every pull request).
+- Update QUICK_FACTS.md, FAQ.md, MAINTENANCE_REPORT.md, AUDIT.md and
+  SUGGESTIONS.md with every change.
+- Every Markdown file starts with a `Last Edit: <author> - <date> - Motive:
+  <summary>` line, and MAINTENANCE_REPORT.md entries are dated and carry a
+  transparency report for AI-assisted work. This is the Thalovant workspace
+  convention and replaces upstream's "timeless text, no dates" rule below for
+  this fork's documentation.
+
+---
+
 # AGENTS.md — `HiveMind_mattermost_bridge`
 
 Guidance for AI coding agents (and humans) working in this repository. Read it
@@ -8,9 +37,10 @@ code and that, if ignored, produce work that will be rejected.
 
 Bridges a Mattermost bot account to a HiveMind node: a HiveMind bridge is a
 satellite whose input and output are a chat platform instead of a microphone.
-Inbound direct messages and mentions become `recognizer_loop:utterance` bus
-messages; the hub's `speak` replies are posted back into the originating
-Mattermost channel. Part of the [HiveMind](https://github.com/JarbasHiveMind)
+Posts that mention the bot or reply in a thread it started (in allowed
+channels), and direct messages when the DM policy allows them, become
+`recognizer_loop:utterance` bus messages; the hub's `speak` replies are posted
+back into the originating channel and thread. Part of the [HiveMind](https://github.com/JarbasHiveMind)
 ecosystem — a protocol for connecting satellite devices to a hub running
 [OpenVoiceOS](https://github.com/OpenVoiceOS). The hub is
 [HiveMind-core](https://github.com/JarbasHiveMind/HiveMind-core); the client
@@ -26,11 +56,14 @@ inventing a new pattern here.
   adding — do not create a second test directory).
 - Set up a throwaway environment inside your clone; never touch a shared venv:
   `python3 -m venv .venv && VIRTUAL_ENV=$PWD/.venv uv pip install -e ".[test]" --prerelease=allow`
-- Run the suite in the foreground: `python3 -m pytest tests/ -q`.
-  `tests/e2e` boots a real loopback `hivemind-core` hub via `hivescope`
-  (extra `e2e`) and drives it over a real `HiveMessageBusClient` — run it too
-  when touching `connect()`, ACL, or handshake behaviour; it is the only
-  suite that can catch a real hang or a real handshake regression.
+- Run the suite in the foreground: `python3 -m pytest tests/ -q` (install
+  `.[test,e2e]`). `tests/fake_mattermost.py` is a local Mattermost stand-in
+  (REST and websocket over real sockets) the unit tests run the bridge
+  against. `tests/e2e` adds a real loopback `hivemind-core` hub via
+  `hivescope` (extra `e2e`) — the suite that can catch a real hang or a real
+  handshake regression. `tests/integration/run.sh` runs the built image
+  against a real Mattermost server in a container; it is not collected by
+  pytest.
 - `uv`, never `pip`. If latest prereleases fail to install or resolve, that is
   a bug to FIX at the source, not to work around with a pin downgrade.
 
@@ -83,44 +116,43 @@ inventing a new pattern here.
 - **Composition, not inheritance.** `HiveMindMattermostBridge` builds (or
   accepts an injected) `HiveMessageBusClient` in `__init__` but does **not**
   connect it there — `HiveMessageBusClient.__init__` never opens a socket.
-  The actual connection happens once, in `start()`. Never add a second call
-  to `connect()` or `run_forever()` — the client already owns and runs its
-  own reconnect worker thread once `connect()` returns. `start()` also
-  guards on `self._started` — do not remove that guard, it is what makes a
-  double call to `start()` a no-op instead of a double connect.
-- **`connect()` already bounds `handshake_max_retries`, keep it that way.**
-  The `hivemind-bus-client` floor is `>=1.0.13a1`; that client's own default
-  for `handshake_max_retries` is `None`, meaning retry forever. This repo
-  currently complies: `start()` passes `self.handshake_max_retries`
-  (constructor default `DEFAULT_HANDSHAKE_MAX_RETRIES = 10`), so a stalled or
-  unreachable hub (down, wrong password) fails fast instead of hanging the
-  bridge forever. Any change to `start()` or `__init__` must preserve an
-  explicit finite bound, exposed as a constructor parameter so operators can
-  tune it — do not silently drop the argument or reintroduce the unbounded
-  default.
+  The actual connection happens once, in `connect_hivemind()`, called from
+  `start()`. Never add a second call to `connect()` or `run_forever()` — the
+  client already owns and runs its own reconnect worker thread once
+  `connect()` returns. `start()` guards on `self._started`; keep it.
+- **`connect()` must bound `handshake_max_retries`.** That client's own
+  default is `None`, retry forever. `connect_hivemind()` passes
+  `self.handshake_max_retries` (`DEFAULT_HANDSHAKE_MAX_RETRIES = 10`), so a
+  stalled or unreachable hub, or a wrong password, ends `start()` instead of
+  hanging it. Keep an explicit finite bound, exposed as a constructor
+  parameter.
+- **The client names no node.** It is built without `identity=`, so it is
+  "unnamed-node" and reads its Noise static key from
+  `~/.config/hivemind/unnamed-node_noise.key`, where the platform mounts the
+  key it keeps. Naming the node moves that path and the hub refuses the new
+  key it would generate.
 - **The hub owns ACL, not this bridge.** A freshly registered HiveMind client
   is denied every message type until an admin runs `hivemind-core allow-msg
   recognizer_loop:utterance <client_id>` (and usually `speak`). This bridge
   has no way to grant itself permissions and must not try to work around a
-  denial locally — a silently dropped message on the hub side is the hub
-  doing its job, not a bug here.
-- **Rejected credentials must fail fast.** The bounded
-  `handshake_max_retries` above is what turns "wrong access key/password"
-  into a clean failure instead of a bridge that spins forever looking
-  connected. Do not add retry/backoff logic on top of `connect()` that
-  defeats this.
-- **Forward upstream responses verbatim.** `handle_speak()` forwards
-  `message.data["utterance"]` to Mattermost with only a `@username` prefix
-  added for addressing; do not reformat, truncate, or otherwise decorate
-  hub-authored text. The one exception is the fixed fallback line on
-  `hive.complete_intent_failure`, which is bridge-authored by design because
-  the hub sent no utterance to relay.
-- **Thread safety.** `MMostBot.listen()` blocks on `mattermostdriver`'s own
-  websocket loop and runs in a daemon thread (`create_daemon`); HiveMind's
-  `speak`/`hive.complete_intent_failure` handlers run on the bus client's own
-  thread. `MMostBot.send_message` and `HiveMessageBusClient.emit` are both
-  safe to call across these threads directly — this bridge does not use
-  asyncio, so there is no event loop to bridge into (unlike bridges built on
-  an async chat SDK, which need `asyncio.run_coroutine_threadsafe` for the
-  same cross-thread hop). Any new callback path added between Mattermost and
-  HiveMind must keep this synchronous, thread-safe shape.
+  denial locally. `allowed_channels` and `dm_policy` are a separate,
+  bridge-side filter over which Mattermost channels may originate traffic.
+- **A refused Mattermost token is final.** `MattermostAPI` raises
+  `TokenRejected` on HTTP 401; the bridge stops, `__main__` writes
+  `token_rejected` to `/dev/termination-log` and exits 78. Do not retry a
+  401. Network failures, by contrast, are retried with backoff.
+- **Return upstream responses verbatim.** `speak()` posts
+  `message.data["utterance"]` unmodified, with only the asker's `@username`
+  in front outside one-to-one DMs. The one exception is the fixed fallback
+  line on `hive.complete_intent_failure`.
+- **Never log what people wrote, what the hub answered, or a token.** Log
+  lengths, ids and exception type names. The websocket library gets its own
+  logger pinned at WARNING (`_WEBSOCKET_LOG`): at debug it prints frames,
+  the token's authentication challenge among them. `tests/test_logs.py`
+  runs the whole path with every logger at debug.
+- **Threads.** The Mattermost websocket runs on an asyncio loop in the thread
+  that called `start()`; blocking REST calls on that loop go through
+  `asyncio.to_thread`. HiveMind's `speak` handler runs on the bus client's
+  thread and posts with a blocking REST call; `MattermostAPI` serialises
+  its `requests.Session` with a lock. A new path between the two keeps
+  that shape.

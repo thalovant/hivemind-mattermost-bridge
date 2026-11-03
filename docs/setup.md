@@ -1,82 +1,101 @@
-# Setup Walkthrough
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Rewritten for bot accounts and access tokens instead of an email login.
 
-From nothing to a working Mattermost chatbot backed by a HiveMind hub.
+# Setup walkthrough
 
-## How the bridge fits together
+A from-scratch guide for someone who has never made a Mattermost bot or
+used HiveMind before.
 
-The bridge is a HiveMind satellite with two connections:
-
-- **To Mattermost** — it logs into a bot account and listens on the Mattermost websocket for posts.
-- **To the HiveMind hub** — it connects as a HiveMind terminal using an access key.
-
-A post that mentions the bot (carries a trigger tag) or a direct message to the bot becomes a `recognizer_loop:utterance` sent to the hub. The originating channel and username travel in the message context, so the hub's `speak` reply is posted back to the right channel.
+## What you are building
 
 ```
-Mattermost channel  ⇄  bridge  ⇄  HiveMind hub  ⇄  OVOS pipeline / skills
+Mattermost user  ⇄  Mattermost server  ⇄  hivemind-mattermost-bridge  ⇄  HiveMind hub  ⇄  OVOS skills
 ```
 
-## Step 1 — Stand up a HiveMind hub
+The bridge is a HiveMind satellite whose "microphone" is a Mattermost bot
+account. A post addressed to the bot becomes a `recognizer_loop:utterance`
+on your hub, and the hub's reply is posted back in the same channel (and
+the same thread).
 
-Install and run [hivemind-core](https://github.com/JarbasHiveMind/HiveMind-core):
+## 1. Create the bot account and its token
+
+As a system admin on the Mattermost server:
+
+1. System Console → Integrations → Bot Accounts: turn on **Enable Bot
+   Account Creation**. Integrations → Integration Management: turn on
+   **Enable Personal Access Tokens**.
+2. Main menu → Integrations → Bot Accounts → **Add Bot Account**. Pick a
+   username, for example `hivebot`. Mattermost shows the bot's first access
+   token once: copy it. More tokens can be made later on the same page.
+3. Add the bot to the team, and to every channel it should answer in
+   (channel menu → Add Members). A bot only sees channels it is a member of.
+4. For each of those channels, note the channel id: channel name → View Info
+   (26 characters, like `6ru4o9giafff9fdm56kb5cqmje`).
+
+Treat the token like a password. Pass it in a file or an environment
+variable, never on a command line.
+
+Or with the API, as an admin (`$ADMIN` is an admin's token):
 
 ```bash
-pip install hivemind-core
-hivemind-core listen
+curl -s -H "Authorization: Bearer $ADMIN" -d '{"username":"hivebot","display_name":"HiveBot"}' \
+  https://chat.example.com/api/v4/bots                       # -> user_id
+curl -s -H "Authorization: Bearer $ADMIN" -d '{"description":"bridge"}' \
+  https://chat.example.com/api/v4/users/<user_id>/tokens     # -> token
 ```
 
-The hub listens on port `5678` by default.
+## 2. Register the bridge on the hub
 
-## Step 2 — Register the bridge as a client
-
-On the hub machine:
+On the machine running `hivemind-core`:
 
 ```bash
-hivemind-core add-client --name mattermost-bridge \
-  --access-key "your-access-key" --password "your-password"
+hivemind-core add-client                                   # access key, password, client id
+hivemind-core allow-msg recognizer_loop:utterance <client_id>
+hivemind-core allow-msg speak <client_id>
 ```
 
-Keep the access key. List clients with `hivemind-core list-clients`.
+Without `allow-msg` the bridge connects, forwards, and the hub silently
+drops everything.
 
-A freshly registered client can connect, but the hub denies every message type until you whitelist it. Skipping this is the most common reason a bridge connects but never replies:
-
-```bash
-hivemind-core allow-msg recognizer_loop:utterance mattermost-bridge
-hivemind-core allow-msg speak mattermost-bridge
-```
-
-## Step 3 — Create a Mattermost bot account
-
-1. On your Mattermost server, create a user account for the bot (or a bot account with login credentials).
-2. Note its login email and password.
-3. Add the account to the channels it should answer in.
-
-## Step 4 — Install the bridge
+## 3. Run the bridge
 
 ```bash
-git clone https://github.com/JarbasHiveMind/HiveMind_mattermost_bridge
-cd HiveMind_mattermost_bridge
 pip install .
+export MATTERMOST_URL=https://chat.example.com
+export MATTERMOST_TOKEN_FILE=$HOME/.secrets/hivebot-token
+export MATTERMOST_ALLOWED_CHANNELS=6ru4o9giafff9fdm56kb5cqmje
+export HIVEMIND_HOST=ws://hub.example.com HIVEMIND_PORT=5678
+export HIVEMIND_ACCESS_KEY=<key> HIVEMIND_PASSWORD_FILE=$HOME/.secrets/hivemind-password
+export BRIDGE_HEALTH_PORT=8080
+hivemind-mattermost-bridge
 ```
 
-## Step 5 — Run
+The log says `== connected to HiveMind`, `== logged in to Mattermost as
+@hivebot` and `== listening to Mattermost`; `curl localhost:8080/readyz`
+answers `ready`.
 
-Pass your Mattermost login (`--mail`, `--pswd`, `--url`), trigger `--tag`, and HiveMind `--host`/`--port`/`--key`/`--password` as flags:
+## 4. Verify the round trip
 
-```bash
-hivemind-mattermost-bridge --mail bot@example.com --pswd bot-password \
-  --url chat.example.com --tag @bot \
-  --host ws://127.0.0.1 --port 5678 \
-  --key your-access-key --password your-hivemind-password
-```
+In an allowed channel, post `@hivebot what time is it?`. The bot answers
+`@you It is ...`. Reply in the thread under its answer without mentioning
+it: it answers in the thread. A post without the mention, a post in another
+channel and, with channels listed, a DM get no answer.
 
-HiveMind identity flags default to the values stored by `hivemind-client set-identity`.
+If nothing comes back but the bridge is ready, check the `allow-msg` step
+first.
 
-## Step 6 — Talk to it
+## Troubleshooting
 
-In a channel the bot is in, mention it with a trigger tag, or send it a direct message:
+**The bridge exits with status 78 and `token_rejected`**: the server refused
+the token (wrong, revoked, or the bot was disabled). Make a new token.
 
-```
-@bot what is the weather?
-```
+**`/readyz` stays 503**: either the hub session is down (the hub's address,
+credentials, `allow-msg`), or the websocket cannot log in. The log names
+which side is retrying.
 
-The bridge forwards the text (with the tag stripped) to the hub and posts the spoken answer back.
+**The hub refuses the bridge after its identity directory was wiped**: the
+hub pinned the bridge's Noise key on first contact. Keep
+`~/.config/hivemind` (or at least `unnamed-node_noise.key`) across restarts,
+or clear the pin on the hub (`hivemind-core reset-noise-pin <client>`).
+
+**A private CA**: set `REQUESTS_CA_BUNDLE` (or `SSL_CERT_FILE`) to the CA
+file; it is used for both the REST calls and the websocket.
