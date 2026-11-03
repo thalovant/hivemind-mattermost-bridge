@@ -137,3 +137,21 @@ def test_the_probes_follow_the_bridge(fake, run_bridge, path, ready_status):
     hub.handshake_event.clear()
     assert get(port, "/readyz") == 503
     assert get(port, "/healthz") == 200
+
+
+def test_an_interrupted_bridge_closes_its_hub_session():
+    """Ctrl-C or SIGTERM (see __main__.stop_on_sigterm) closes the hub connection on the way out."""
+    from unittest.mock import MagicMock
+
+    from mattermost_bridge import HiveMindMattermostBridge
+
+    hub = make_hub()
+    bridge = HiveMindMattermostBridge(client=hub, api=MagicMock())
+
+    async def interrupted():
+        raise KeyboardInterrupt
+
+    bridge._run_mattermost = interrupted
+    with pytest.raises(KeyboardInterrupt):
+        bridge.start()
+    hub.close.assert_called_once()

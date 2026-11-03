@@ -228,3 +228,25 @@ def test_any_other_stop_writes_no_termination_message(tmp_path, monkeypatch):
     monkeypatch.setattr("os.environ", dict(BASE))
     cli.main([])
     assert not log.exists()
+
+
+def test_sigterm_stops_the_bridge_like_ctrl_c(monkeypatch):
+    """PID 1 in a container ignores a signal it has no handler for."""
+    import signal
+
+    import mattermost_bridge.__main__ as cli
+
+    previous = signal.getsignal(signal.SIGTERM)
+    seen = {}
+
+    def run(**options):
+        seen["handler"] = signal.getsignal(signal.SIGTERM)
+        signal.raise_signal(signal.SIGTERM)
+
+    monkeypatch.setattr(cli, "connect_mattermost_to_hivemind", run)
+    monkeypatch.setattr("os.environ", dict(BASE))
+    try:
+        cli.main([])  # returns: the SIGTERM became a clean shutdown
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    assert seen["handler"] is cli.stop_on_sigterm

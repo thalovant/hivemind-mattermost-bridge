@@ -16,6 +16,7 @@ reads a container's termination message) and exits with status 78
 """
 import argparse
 import os
+import signal
 from typing import Mapping, Optional, Sequence
 
 from ovos_utils.log import LOG
@@ -261,9 +262,20 @@ def write_termination_message(message: str, path: Optional[str] = None) -> None:
         pass
 
 
+def stop_on_sigterm(signum: int, frame: object) -> None:
+    """SIGTERM stops the bridge the way Ctrl-C does.
+
+    In a container the bridge is PID 1, and the kernel does not deliver a
+    signal to PID 1 that it has no handler for: without this, ``docker stop``
+    and a Kubernetes rollout wait out the grace period and then kill it.
+    """
+    raise KeyboardInterrupt
+
+
 def main(argv: Optional[Sequence[str]] = None) -> None:
     """Run the bridge with settings from flags, the environment and secret files."""
     options = resolve_options(argv)
+    signal.signal(signal.SIGTERM, stop_on_sigterm)
     LOG.info("bridge starting; press Ctrl-C to stop")
     try:
         connect_mattermost_to_hivemind(**options)

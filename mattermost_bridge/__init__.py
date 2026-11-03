@@ -237,7 +237,7 @@ class HiveMindMattermostBridge:
         )
         try:
             asyncio.run(self._run_mattermost())
-        except TokenRejected:
+        except (TokenRejected, KeyboardInterrupt):
             self.stop()
             raise
 
