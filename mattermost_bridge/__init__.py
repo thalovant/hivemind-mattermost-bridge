@@ -28,14 +28,18 @@ recurring bug across every HiveMind bridge written so far:
 
 Threads: the Mattermost websocket runs on an asyncio loop in the thread
 that called ``start()``. HiveMind's ``speak`` handler runs on the bus
-client's own thread and posts the reply with a blocking REST call, which
-:class:`~mattermost_bridge.mattermost.MattermostAPI` makes thread safe.
+client's own thread and only queues the reply; one sender thread posts the
+queued replies in order, paced, with blocking REST calls that
+:class:`~mattermost_bridge.mattermost.MattermostAPI` makes thread safe. The
+hub's thread never waits on Mattermost.
 """
 import asyncio
 import contextlib
 import json
 import logging
+import queue
 import threading
+import time
 from collections import OrderedDict
 from typing import Iterable, Optional
 
@@ -53,13 +57,16 @@ from mattermost_bridge.health import HealthServer
 from mattermost_bridge.mattermost import (
     DIRECT,
     DIRECT_CHANNEL_TYPES,
+    MAX_POST_LENGTH,
     MattermostAPI,
     Post,
+    RateLimited,
     USERNAME_PATTERN,
     TokenRejected,
     defuse_reply,
     mention_pattern,
     parse_posted,
+    split_post,
     websocket_host,
 )
 
@@ -97,6 +104,23 @@ THREAD_ROOT_CACHE_SIZE = 1024
 #: sending events on it, so without this the bridge would go deaf and stay
 #: "ready".
 TOKEN_CHECK_INTERVAL = 60
+
+#: Replies waiting for the sender thread; a reply beyond this is dropped
+#: (logged), so a hub that answers faster than Mattermost takes posts cannot
+#: grow the bridge's memory without end.
+REPLY_QUEUE_SIZE = 100
+#: Seconds between two posts by the bridge.
+REPLY_INTERVAL = 0.2
+#: Tries per post while the server answers 429 (rate limited).
+RATE_LIMIT_ATTEMPTS = 3
+#: The longest wait a 429 may ask for, in seconds.
+RATE_LIMIT_MAX_WAIT = 30
+#: A reply longer than one post is split; past this many posts it is cut.
+MAX_REPLY_POSTS = 4
+#: What ends a cut reply.
+CUT_MARK = " [...]"
+#: Seconds ``stop()`` gives the queued replies to go out.
+REPLY_DRAIN_TIMEOUT = 5
 
 # The websockets library logs every frame at debug level, the token's
 # authentication challenge and everyone's messages among them. Give it a
@@ -205,6 +229,15 @@ class HiveMindMattermostBridge:
         self._mention = None
         self._roots: "OrderedDict[str, bool]" = OrderedDict()
         self._roots_lock = threading.Lock()
+        # Replies: queued by the hub's thread, posted by the sender thread.
+        # The count is the bound (the queue itself is unbounded so that the
+        # sender's wake-up on stop always fits).
+        self._outbox: "queue.Queue[Optional[dict]]" = queue.Queue()
+        self._unsent = 0
+        self._unsent_changed = threading.Condition()
+        self._sender: Optional[threading.Thread] = None
+        self._sender_lock = threading.Lock()
+        self._sender_stop = threading.Event()
 
     # ------------------------------------------------------------------
     # lifecycle
@@ -267,6 +300,7 @@ class HiveMindMattermostBridge:
             LOG.exception("error closing HiveMind client")
         self._started = False
         self._connected.clear()
+        self._stop_replies(REPLY_DRAIN_TIMEOUT)
         if self._health is not None:
             self._health.stop()
             self._health = None
@@ -637,10 +671,75 @@ class HiveMindMattermostBridge:
             LOG.warning(f"not replying in non-allowed channel {channel_id}")
             return
         user = context.get("user") if isinstance(context.get("user"), dict) else {}
-        self.speak(text, channel_id,
-                   root_id=context.get("root_id") or "",
-                   username=user.get("mattermost_username"),
-                   channel_type=context.get("channel_type"))
+        self._queue_reply({
+            "text": text,
+            "channel_id": channel_id,
+            "root_id": context.get("root_id") or "",
+            "username": user.get("mattermost_username"),
+            "channel_type": context.get("channel_type"),
+        })
+
+    def _queue_reply(self, reply: dict) -> None:
+        """Hand ``reply`` (``speak``'s arguments) to the sender thread; never blocks."""
+        with self._unsent_changed:
+            if self._unsent >= REPLY_QUEUE_SIZE:
+                LOG.warning(f"dropping a reply for channel {reply['channel_id']}: "
+                            f"{REPLY_QUEUE_SIZE} replies are already waiting")
+                return
+            self._unsent += 1
+        self._ensure_sender()
+        self._outbox.put(reply)
+
+    def _ensure_sender(self) -> None:
+        with self._sender_lock:
+            if self._sender is not None and self._sender.is_alive():
+                return
+            self._sender_stop.clear()
+            self._sender = threading.Thread(target=self._send_replies,
+                                            name="mattermost-replies", daemon=True)
+            self._sender.start()
+
+    def _send_replies(self) -> None:
+        """The sender thread: post queued replies in order, ``REPLY_INTERVAL`` apart."""
+        last = None
+        while True:
+            reply = self._outbox.get()
+            if reply is None:
+                return
+            try:
+                if self._sender_stop.is_set() or self._token_rejected.is_set():
+                    continue  # stopping: what is left is dropped
+                if last is not None:
+                    wait = last + REPLY_INTERVAL - time.monotonic()
+                    if wait > 0 and self._sender_stop.wait(wait):
+                        continue
+                self.speak(**reply)
+                last = time.monotonic()
+            except Exception as error:  # the sender must outlive one bad reply
+                LOG.error(f"could not send a reply: {type(error).__name__}")
+            finally:
+                with self._unsent_changed:
+                    self._unsent -= 1
+                    self._unsent_changed.notify_all()
+
+    def flush_replies(self, timeout: float = REPLY_DRAIN_TIMEOUT) -> bool:
+        """Wait until every queued reply was posted (or given up); ``False`` on timeout."""
+        with self._unsent_changed:
+            return self._unsent_changed.wait_for(lambda: self._unsent == 0, timeout)
+
+    def _stop_replies(self, timeout: float) -> None:
+        """Give the queued replies ``timeout`` seconds, drop the rest, end the sender."""
+        sender = self._sender
+        if sender is None:
+            return
+        if not self._token_rejected.is_set() and not self.flush_replies(timeout):
+            LOG.warning("stopping with replies not yet posted; they are dropped")
+        self._sender_stop.set()  # also ends a rate-limit wait
+        self._outbox.put(None)
+        sender.join(2)
+        with self._sender_lock:
+            if self._sender is sender:
+                self._sender = None
 
     def speak(self, text: str, channel_id: str, root_id: str = "",
               username: Optional[str] = None, channel_type: Optional[str] = None) -> None:
@@ -651,29 +750,63 @@ class HiveMindMattermostBridge:
         a reply never pings ``@channel``, ``@all``, ``@here``, a group or a
         person. Outside a one-to-one direct message the reply then starts
         with the asker's ``@username``, the one mention the bridge makes, so
-        in a busy channel it is clear whom it answers. Called from the
-        HiveMind bus's own thread; the REST call is blocking and thread safe.
+        in a busy channel it is clear whom it answers. A reply longer than
+        one post is split, at most ``MAX_REPLY_POSTS`` posts; a post the
+        server rate limits is retried (``RATE_LIMIT_ATTEMPTS``). Blocking:
+        the sender thread calls it (``handle_speak`` only queues).
         """
         text = defuse_reply(str(text))
+        prefix = ""
         if (username and channel_type != DIRECT and USERNAME_PATTERN.fullmatch(str(username))
                 and str(username).lower() not in CHANNEL_WIDE_MENTIONS):
-            text = f"@{username} {text}"
-        # The length, never the text: replies carry what people asked about,
-        # and a debug log is kept, shipped and read far more widely than the chat.
-        LOG.debug(f"Sending message to Mattermost channel {channel_id}: {len(text)} characters")
-        try:
-            post = self.api.create_post(channel_id, text, root_id=root_id)
-        except TokenRejected:
-            LOG.error("Mattermost refused the bot's access token")
-            self._reject_token()
-            return
-        except Exception as error:
-            LOG.error(f"failed to post to Mattermost channel {channel_id}: "
-                      f"{type(error).__name__}: {error}")
-            return
-        if not root_id and isinstance(post, dict) and post.get("id"):
-            # A top-level reply can become a thread; replies in it are for the bot.
-            self._remember_root(str(post["id"]), True)
+            prefix = f"@{username} "
+        # One post holds MAX_POST_LENGTH characters: a longer reply is split
+        # (the first part names the asker), and past MAX_REPLY_POSTS cut.
+        limit = MAX_POST_LENGTH - len(prefix)
+        parts = split_post(text, limit)
+        if len(parts) > MAX_REPLY_POSTS:
+            LOG.warning(f"a reply of {len(text)} characters is cut to {MAX_REPLY_POSTS} posts")
+            parts = parts[:MAX_REPLY_POSTS]
+            parts[-1] = parts[-1][:limit - len(CUT_MARK)] + CUT_MARK
+        for number, part in enumerate(parts):
+            message = prefix + part if number == 0 else part
+            # The length, never the text: replies carry what people asked about,
+            # and a debug log is kept, shipped and read far more widely than the chat.
+            LOG.debug(f"Sending message to Mattermost channel {channel_id}: "
+                      f"{len(message)} characters")
+            post = self._post(channel_id, message, root_id)
+            if post is None:
+                return
+            if not root_id and post.get("id"):
+                # A top-level reply can become a thread; replies in it are for the bot.
+                self._remember_root(str(post["id"]), True)
+
+    def _post(self, channel_id: str, message: str, root_id: str) -> Optional[dict]:
+        """One post, retried while the server rate limits it; ``None`` when it was not posted."""
+        for attempt in range(1, RATE_LIMIT_ATTEMPTS + 1):
+            try:
+                post = self.api.create_post(channel_id, message, root_id=root_id)
+            except RateLimited as limited:
+                if attempt == RATE_LIMIT_ATTEMPTS:
+                    break
+                wait = min(limited.retry_after, RATE_LIMIT_MAX_WAIT)
+                LOG.warning(f"Mattermost rate limit on channel {channel_id}; "
+                            f"retrying in {wait:.1f} s")
+                if self._sender_stop.wait(wait):
+                    return None
+                continue
+            except TokenRejected:
+                LOG.error("Mattermost refused the bot's access token")
+                self._reject_token()
+                return None
+            except Exception as error:
+                LOG.error(f"failed to post to Mattermost channel {channel_id}: "
+                          f"{type(error).__name__}: {error}")
+                return None
+            return post if isinstance(post, dict) else {}
+        LOG.error(f"failed to post to Mattermost channel {channel_id}: "
+                  f"still rate limited after {RATE_LIMIT_ATTEMPTS} tries")
+        return None
 
 
 # Backwards-compat alias for the old public name.

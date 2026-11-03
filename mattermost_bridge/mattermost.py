@@ -21,7 +21,7 @@ import re
 import ssl
 import threading
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import quote, urlsplit, urlunsplit
 
 import requests
@@ -61,6 +61,59 @@ class MattermostError(Exception):
     def __init__(self, method: str, endpoint: str, status: int):
         super().__init__(f"{method} {endpoint} answered HTTP {status}")
         self.status = status
+
+
+class RateLimited(MattermostError):
+    """The server refused a call for its rate limit (HTTP 429); ``retry_after`` seconds to wait."""
+
+    def __init__(self, method: str, endpoint: str, retry_after: float):
+        super().__init__(method, endpoint, 429)
+        self.retry_after = retry_after
+
+
+#: Seconds to wait after a 429 that names no time.
+DEFAULT_RETRY_AFTER = 1.0
+
+
+def retry_after(headers: Any) -> float:
+    """Seconds a 429 asks to wait: ``Retry-After``, else ``X-Ratelimit-Reset`` (Mattermost sends both)."""
+    for name in ("Retry-After", "X-Ratelimit-Reset"):
+        try:
+            seconds = float(headers.get(name))
+        except (TypeError, ValueError):  # absent, or an HTTP date
+            continue
+        if seconds >= 0:
+            return seconds
+    return DEFAULT_RETRY_AFTER
+
+
+#: The longest post Mattermost takes by default (``MaxPostSize``), in
+#: characters (the server counts code points, as ``len`` does).
+MAX_POST_LENGTH = 16383
+
+
+def split_post(text: str, limit: int = MAX_POST_LENGTH) -> List[str]:
+    """``text`` as pieces of at most ``limit`` characters.
+
+    Each cut is at the last paragraph break, else line break, else space in
+    the second half of the piece, and that separator is dropped; a piece
+    with none is cut at ``limit``. Nothing else is changed or lost.
+    """
+    if limit < 1:
+        raise ValueError("limit must be at least 1")
+    parts: List[str] = []
+    while len(text) > limit:
+        cut, skip = limit, 0
+        for separator in ("\n\n", "\n", " "):
+            found = text.rfind(separator, limit // 2, limit + len(separator))
+            if found > 0:
+                cut, skip = found, len(separator)
+                break
+        parts.append(text[:cut])
+        text = text[cut + skip:]
+    if text or not parts:
+        parts.append(text)
+    return parts
 
 
 def normalise_url(url: str) -> str:
@@ -273,6 +326,8 @@ class MattermostAPI:
                                              allow_redirects=False, **kwargs)
         if response.status_code == 401:
             raise TokenRejected()
+        if response.status_code == 429:
+            raise RateLimited(method, endpoint, retry_after(response.headers))
         if response.status_code >= 300:
             raise MattermostError(method, endpoint, response.status_code)
         try:
@@ -301,8 +356,9 @@ class MattermostAPI:
 
 __all__ = [
     "API_PATH", "DIRECT", "DIRECT_CHANNEL_TYPES", "GROUP_DIRECT", "ID_PATTERN",
-    "MattermostAPI", "MattermostError", "Post", "TokenRejected", "WORD_JOINER",
-    "ca_bundle", "defuse_reply",
+    "MAX_POST_LENGTH", "MattermostAPI", "MattermostError", "Post", "RateLimited",
+    "TokenRejected", "WORD_JOINER", "ca_bundle", "defuse_reply", "retry_after",
+    "split_post",
     "mention_pattern", "normalise_url", "parse_posted", "websocket_host",
     "websocket_url_for",
 ]

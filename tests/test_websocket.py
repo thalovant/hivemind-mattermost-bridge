@@ -18,6 +18,7 @@ def test_a_post_on_the_websocket_reaches_the_hub_and_the_reply_comes_back(fake, 
     assert hub.emit.call_args[0][0].payload.data["utterances"] == ["what time is it"]
 
     running.bridge.handle_speak(Message("speak", {"utterance": "It is three."}, context))
+    assert running.bridge.flush_replies(5)
     assert fake.created == [{"channel_id": TOWN_SQUARE, "message": "@alice It is three."}]
 
 
@@ -29,6 +30,7 @@ def test_a_reply_in_a_thread_the_bot_started_is_answered_in_that_thread(fake, ru
     assert wait_for(lambda: hub.emit.called)
     context = hub.emit.call_args[0][0].payload.context
     running.bridge.handle_speak(Message("speak", {"utterance": "Rain."}, context))
+    assert running.bridge.flush_replies(5)
     assert fake.created == [{"channel_id": TOWN_SQUARE, "message": "@alice Rain.", "root_id": root}]
 
 

@@ -83,6 +83,9 @@ class FakeMattermost:
         self.created: List[dict] = []
         self.calls: List[str] = []
         self.auth_attempts = 0
+        #: Answer this many of the next ``POST /posts`` with 429 and ``Retry-After``.
+        self.rate_limit_posts = 0
+        self.retry_after = "0.05"
         self._connections: set = set()
         self._http: Optional[ThreadingHTTPServer] = None
         self._loop = asyncio.new_event_loop()
@@ -199,6 +202,11 @@ class FakeMattermost:
             if post is None:
                 return self._answer(handler, 404, {"status_code": 404})
             return self._answer(handler, 200, post)
+        if method == "POST" and handler.path == "/api/v4/posts" and self.rate_limit_posts > 0:
+            self.rate_limit_posts -= 1
+            return self._answer(handler, 429, {"id": "api.context.rate_limit", "status_code": 429},
+                                headers={"Retry-After": self.retry_after,
+                                         "X-Ratelimit-Reset": self.retry_after})
         if method == "POST" and handler.path == "/api/v4/posts":
             request = json.loads(body or b"{}")
             post = {"id": new_id(), "user_id": BOT_ID, "root_id": request.get("root_id", ""),
@@ -209,9 +217,12 @@ class FakeMattermost:
         return self._answer(handler, 404, {"status_code": 404})
 
     @staticmethod
-    def _answer(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
+    def _answer(handler: BaseHTTPRequestHandler, status: int, payload: dict,
+                headers: Optional[Dict[str, str]] = None) -> None:
         data = json.dumps(payload).encode("utf-8")
         handler.send_response(status)
+        for name, value in (headers or {}).items():
+            handler.send_header(name, value)
         handler.send_header("Content-Type", "application/json")
         handler.send_header("Content-Length", str(len(data)))
         handler.end_headers()

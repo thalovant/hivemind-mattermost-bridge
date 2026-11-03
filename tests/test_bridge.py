@@ -187,7 +187,9 @@ def test_an_unknown_dm_policy_is_refused():
 # replies
 # ---------------------------------------------------------------------------
 def speak(bridge, utterance, **context):
+    """``speak`` from the hub, then wait for the sender thread to have posted it."""
     bridge.handle_speak(Message("speak", {"utterance": utterance}, context))
+    assert bridge.flush_replies(5), "the reply was never sent"
 
 
 def test_a_reply_goes_to_the_questions_channel_naming_the_asker():
@@ -217,6 +219,7 @@ def test_a_reply_without_a_channel_is_dropped():
     bridge, _, api = bridge_with()
     speak(bridge, "hi there", user={"mattermost_username": "alice"})
     bridge.handle_intent_failure(Message("hive.complete_intent_failure", {}, {}))
+    assert bridge.flush_replies(5)
     speak(bridge, "", channel=TOWN_SQUARE)
     api.create_post.assert_not_called()
 
@@ -225,6 +228,7 @@ def test_an_intent_failure_gets_the_fallback_line():
     bridge, _, api = bridge_with()
     bridge.handle_intent_failure(Message("hive.complete_intent_failure", {},
                                          {"channel": DM_CHANNEL, "channel_type": "D"}))
+    assert bridge.flush_replies(5)
     channel, text = api.create_post.call_args[0]
     assert channel == DM_CHANNEL and "don't know" in text
 
