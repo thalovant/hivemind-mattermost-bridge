@@ -1,5 +1,3 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Examples for the bot-token client; the standalone echo bot is gone with MMostBot.
-
 # Examples
 
 ## Run the bridge

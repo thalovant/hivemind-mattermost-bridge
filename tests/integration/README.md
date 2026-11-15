@@ -1,5 +1,3 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: The image against a real Mattermost server and a real hub, scripted.
-
 # Integration: the image against a real Mattermost server
 
 `run.sh` starts `mattermost/mattermost-preview` (Mattermost with its own

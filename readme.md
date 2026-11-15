@@ -1,5 +1,3 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Review: replies never ping @channel/@all/@here, are split when too long, go only to allowed channels.
-
 # HiveMind Mattermost Bridge
 
 This bridges a Mattermost bot account to a HiveMind node. A HiveMind bridge

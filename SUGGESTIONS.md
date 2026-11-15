@@ -1,5 +1,3 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Platform state: the operator keys on the termination message and renders the bridge without a network table; the https-only URL check is in the platform API's connector catalog change.
-
 # Suggestions: hivemind-mattermost-bridge
 
 ## Resume the websocket after a gap

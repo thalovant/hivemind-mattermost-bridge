@@ -1,5 +1,3 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: CodeRabbit review bodies on PR #2: a reply's channel type is the bridge's own, not the hub's; split replies stop with the bridge; Retry-After HTTP date.
-
 # Configuration reference
 
 Settings are resolved by `resolve_options` in `mattermost_bridge/__main__.py`:
