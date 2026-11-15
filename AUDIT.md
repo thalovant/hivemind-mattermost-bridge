@@ -2,6 +2,8 @@
 
 ## 2026-11-15 - Per-file author/date/motive headers
 
+Known failing test, not caused by this change: `tests/e2e/test_bridge_hivemind_e2e.py::test_round_trip_mattermost_to_hivemind_and_back` ("no reply posted: the speak never round-tripped", 1 failed, 180 passed on Python 3.12 and 3.14). On 2026-11-15 the same test failed identically when CI was re-run on the unchanged `main` commit of 2026-11-03 (run 41650622596, which had passed then), so a dependency or environment change since then is the likely cause. Not investigated further.
+
 Finding: 14 files carried an author/date/motive header line that the owner has withdrawn. State: fixed in this change (a case-insensitive `git grep` for the header keyword is empty). No code path was touched, so no test result changes; the repository's CI on the pull request is the test of record.
 
 Evidence (review, 2026-11-03, branch `fix/review-2026-11-03` off `main` `2a45629c`): `python -m pytest tests -q` with `.[test,e2e]` on Python 3.12: 168 passed (121 before the review, e2e excluded); every new test was seen failing with its fix reverted, and six behaviours of the reply sender were gutted one at a time (split, pacing, 429, wait cap, bound, drain), each caught. Line numbers in the review sections refer to that branch.
