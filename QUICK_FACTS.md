@@ -1,5 +1,3 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Test count after the PR #2 review-body fixes (181).
-
 # Quick facts: hivemind-mattermost-bridge
 
 | Key | Value |

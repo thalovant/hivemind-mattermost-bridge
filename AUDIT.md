@@ -1,6 +1,8 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Section 1: where the operator runs the bridge, the allow-list and DM policy are always set.
-
 # Audit: hivemind-mattermost-bridge
+
+## 2026-11-15 - Per-file author/date/motive headers
+
+Finding: 14 files carried an author/date/motive header line that the owner has withdrawn. State: fixed in this change (a case-insensitive `git grep` for the header keyword is empty). No code path was touched, so no test result changes; the repository's CI on the pull request is the test of record.
 
 Evidence (review, 2026-11-03, branch `fix/review-2026-11-03` off `main` `2a45629c`): `python -m pytest tests -q` with `.[test,e2e]` on Python 3.12: 168 passed (121 before the review, e2e excluded); every new test was seen failing with its fix reverted, and six behaviours of the reply sender were gutted one at a time (split, pacing, 429, wait cap, bound, drain), each caught. Line numbers in the review sections refer to that branch.
 

@@ -1,5 +1,3 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: The managed deployment mounts both identity keys; the operator keys a rejected token on the termination message.
-
 # FAQ: hivemind-mattermost-bridge
 
 ## Why does the bot ignore some posts in a channel?

@@ -1,5 +1,3 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Rewritten for bot accounts and access tokens instead of an email login.
-
 # Setup walkthrough
 
 A from-scratch guide for someone who has never made a Mattermost bot or

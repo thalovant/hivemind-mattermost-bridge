@@ -1,5 +1,3 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Review: code map names the reply sender and the new helpers.
-
 # hivemind-mattermost-bridge
 
 A HiveMind bridge for Mattermost: a satellite whose input and output are a

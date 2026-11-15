@@ -1,5 +1,3 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Rewritten as the container contract: files, environment, probes, termination message; a local server for trying it.
-
 # Running the bridge as a managed container
 
 This is the shape the image is built for: one replica per bot, every
